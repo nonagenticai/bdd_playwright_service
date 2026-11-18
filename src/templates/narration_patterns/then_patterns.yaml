@@ -1,0 +1,42 @@
+patterns:
+  - match: "I should see {text}"
+    tutorial: "You should now see {text} on the page."
+    demo: "Notice that {text} appears on the screen."
+    marketing: "Instantly, {text} appears — confirming success."
+    technical: "Assert visibility of text {text}."
+
+  - match: "I should see {text} on the page"
+    tutorial: "You should now see {text} displayed on the page."
+    demo: "Notice that {text} is now visible."
+    marketing: "{text} appears right away — that's the power of simplicity."
+    technical: "Assert page contains text {text}."
+
+  - match: "I should be redirected to the {page}"
+    tutorial: "You are now redirected to the {page}."
+    demo: "We're now on the {page}."
+    marketing: "Seamlessly, you arrive at the {page}."
+    technical: "Verify redirect to {page}."
+
+  - match: "the {element} should be visible"
+    tutorial: "The {element} should now be visible on the page."
+    demo: "The {element} is now displayed."
+    marketing: "The {element} appears, right where you need it."
+    technical: "Assert element {element} is visible."
+
+  - match: "I should see an error message"
+    tutorial: "An error message should be displayed."
+    demo: "Notice the error message that appears."
+    marketing: "A helpful error message guides you to the right action."
+    technical: "Assert error message is displayed."
+
+  - match: "the page title should be {title}"
+    tutorial: "The page title should now read {title}."
+    demo: "Notice the page title shows {title}."
+    marketing: "The page title confirms you're in the right place: {title}."
+    technical: "Assert page title equals {title}."
+
+fallback:
+  tutorial: "You should see that {step_text}."
+  demo: "Notice that {step_text}."
+  marketing: "{step_text} — delivering results instantly."
+  technical: "Assertion: {step_text}."

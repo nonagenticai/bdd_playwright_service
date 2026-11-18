@@ -1,0 +1,13 @@
+test-results/
+coverage.xml
+__pycache__/
+.coverage
+
+# Developer-local CI failure snapshots written by ad-hoc tooling.
+0*_recent_push_failure.txt
+.worktrees/
+
+# Playwright auth storage state (captured session cookies — never commit)
+**/.auth/
+# Local commonpractice recording package (scratch + captured auth)
+commonpractice/

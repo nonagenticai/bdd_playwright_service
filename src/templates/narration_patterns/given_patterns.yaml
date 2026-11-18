@@ -1,0 +1,30 @@
+patterns:
+  - match: "I am on the {page_name} page"
+    tutorial: "Let's start by navigating to the {page_name} page."
+    demo: "First, we'll take a look at the {page_name} page."
+    marketing: "Discover the power of the {page_name} page."
+    technical: "Navigate to the {page_name} endpoint."
+
+  - match: "I am logged in as {user}"
+    tutorial: "We begin by logging in as {user}."
+    demo: "Here we're logged in as {user}."
+    marketing: "As {user}, you have instant access to everything."
+    technical: "Authenticate as user {user}."
+
+  - match: "the application is loaded"
+    tutorial: "First, let's make sure the application has loaded."
+    demo: "The application is ready to go."
+    marketing: "The application loads instantly, ready for action."
+    technical: "Verify application initialization complete."
+
+  - match: "I have navigated to {url}"
+    tutorial: "Let's navigate to {url}."
+    demo: "We're now at {url}."
+    marketing: "Head over to {url} to get started."
+    technical: "Navigate to URL {url}."
+
+fallback:
+  tutorial: "First, {step_text}."
+  demo: "To start, {step_text}."
+  marketing: "Begin your journey — {step_text}."
+  technical: "Precondition: {step_text}."

@@ -1,0 +1,48 @@
+patterns:
+  - match: "I click the {element} button"
+    tutorial: "Now, click the {element} button."
+    demo: "Next, we click {element}."
+    marketing: "With a single click on {element}, the magic happens."
+    technical: "Click button element {element}."
+
+  - match: "I click {element}"
+    tutorial: "Now, click on {element}."
+    demo: "Let's click {element}."
+    marketing: "Simply click {element} to continue."
+    technical: "Click element {element}."
+
+  - match: "I fill {field} with {value}"
+    tutorial: "Type {value} into the {field} field."
+    demo: "We'll enter {value} in the {field} field."
+    marketing: "Effortlessly enter {value} in {field}."
+    technical: "Input {value} into field {field}."
+
+  - match: "I enter {value} in the {field} field"
+    tutorial: "Type {value} into the {field} field."
+    demo: "We'll enter {value} in the {field} field."
+    marketing: "Effortlessly enter {value} into {field}."
+    technical: "Input {value} into field {field}."
+
+  - match: "I submit the form"
+    tutorial: "Now submit the form."
+    demo: "Let's submit the form."
+    marketing: "Submit the form and watch the results appear instantly."
+    technical: "Submit the form element."
+
+  - match: "I scroll to {element}"
+    tutorial: "Scroll down to {element}."
+    demo: "Let's scroll to {element}."
+    marketing: "Scroll to discover {element}."
+    technical: "Scroll viewport to element {element}."
+
+  - match: "I navigate to {page}"
+    tutorial: "Navigate to the {page} page."
+    demo: "Now let's head to {page}."
+    marketing: "Explore the {page} section."
+    technical: "Navigate to {page}."
+
+fallback:
+  tutorial: "Next, {step_text}."
+  demo: "Here, {step_text}."
+  marketing: "{step_text} — making your workflow effortless."
+  technical: "Action: {step_text}."
