@@ -51,9 +51,12 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app
 
+# libatomic1: Playwright's bundled Node driver needs it, and debian-slim has
+# none. Without it the driver exits 127 before `--with-deps` can add the rest.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     curl \
+    libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
