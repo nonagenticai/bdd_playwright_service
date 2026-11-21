@@ -61,7 +61,6 @@ class TestSettings:
             "video_production_url",
             "tts_url",
             "content_url",
-            "webscraper_url",
         ):
             assert not hasattr(settings.downstream, removed), (
                 f"settings.downstream.{removed} should have been removed"
@@ -84,9 +83,9 @@ class TestSettings:
         assert service_url("app_inspector").startswith("http://app-inspector-service.w2v")
         assert service_url("video_production").startswith("http://video-production-service.w2v")
         assert service_url("tts").startswith("http://tts:9202")
+        # Page inspection is in-process since the self-contained fetcher landed;
+        # there is no webscraper peer URL to resolve for this service.
         assert service_url("content").startswith("http://content-service.w2v")
-        # scraping goes straight to webscraper (its own namespace; KAG retired)
-        assert service_url("webscraper").startswith("http://webscraper.webscraper")
 
     def test_service_url_respects_per_peer_override(self, monkeypatch):
         """W2V_<NAME>_URL env var must override the discovered URL."""

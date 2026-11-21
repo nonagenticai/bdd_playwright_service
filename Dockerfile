@@ -71,6 +71,14 @@ COPY --chown=bddservice:bddservice alembic.ini ./alembic.ini
 
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Headless Chromium for the in-service page fetcher. Installed system-wide
+# (PLAYWRIGHT_BROWSERS_PATH) so the unprivileged runtime user can read it and a
+# read-only root filesystem stays possible. --with-deps pulls the shared
+# libraries and fonts Chromium needs on debian-slim.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
+
 USER 1000:1000
 
 # Port 6313 (BDD Playwright Service)

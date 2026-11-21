@@ -12,7 +12,6 @@ from typing import Any
 import httpx
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
-from w2v_common.auth.tenant_licence_lane import TenantLicenceLane
 from w2v_common.discovery import service_url
 
 from src.api.constants import STREAM_ACCESSIBILITY, STREAM_DEMO_VIDEO, STREAM_QA_SUITE
@@ -40,6 +39,7 @@ from src.services.generation.step_def_generator import (
 from src.services.input.gherkin_parser import GherkinParser
 from src.services.input.html_structure import extract_structure
 from src.services.input.inspection_adapter import InspectionAdapter
+from src.services.input.page_fetcher import FetchedImage, FetchedPage, PageFetcher
 from src.services.job_manager import JobManager
 from src.services.narration.humanizer import (
     MIN_SHORTFALL_WORDS,
@@ -127,6 +127,27 @@ def _interior_urls(base_url: str, target_pages: list[str]) -> tuple[list[str], i
             urls.append(absolute)
     dropped = max(0, len(urls) - _MAX_INSPECT_SCREENS)
     return urls[:_MAX_INSPECT_SCREENS], dropped
+
+
+def _snapshot_entry_page(entry: object) -> dict[str, Any] | None:
+    """One inspection page from a snapshot entry, or ``None`` when unusable."""
+    if not isinstance(entry, dict):
+        return None
+    url = str(entry.get("url") or "").strip()
+    html = entry.get("html")
+    if not url or not isinstance(html, str) or not html:
+        return None
+    links = entry.get("links") or []
+    images = entry.get("images") or []
+    page = FetchedPage(
+        url=url,
+        title=str(entry.get("title") or ""),
+        html=html,
+        text=str(entry.get("text") or ""),
+        links=[str(link) for link in links if isinstance(link, str)],
+        images=[FetchedImage(src=str(src)) for src in images if isinstance(src, str)],
+    )
+    return _page_from_scrape(page)
 
 
 def _page_from_scrape(response: Any) -> dict[str, Any]:
@@ -339,11 +360,6 @@ class JobProcessor:
         self._package_builder = PackageBuilder(self._storage)
         self._narration_engine: NarrationTemplateEngine | None = None
         self._settings = settings
-        # WEBSCRAPER_AUTH_MODE: shared (default) or tenant_licence, where the
-        # web-inspection scrape carries the job tenant's OWN minted w2v licence
-        # (the job task inherits the request's vouched identity, see
-        # services/background.py) and never the shared/request token.
-        self._webscraper_lane = TenantLicenceLane("webscraper")
 
     async def aclose(self) -> None:
         """Release per-processor transports (the MinIO client's aiohttp session)."""
@@ -672,27 +688,22 @@ class JobProcessor:
         *,
         target_url: str,
         config: dict[str, Any],
-        effective_token: str,
+        tenant_id: str | None,
     ) -> dict[str, Any]:
-        """Inspect a live site — authenticated + multi-screen where possible.
+        """Inspect a live site with the in-service fetcher.
 
-        The old path scraped ONE unauthenticated landing page, so every generated
-        selector came from a single public screen (weak steps). Now:
+        The fetcher renders each page with headless Chromium (or fetches static
+        HTML when ``javascript_enabled`` is false), so interior routes listed in
+        ``target_pages`` are inspected alongside the landing page and the
+        generated steps hit REAL interior screens.
 
-        * ``auth_config`` (from the demo request) is forwarded to the scrape, so a
-          login-gated app is inspected as an authenticated session (webscraper resolves
-          the credential and drives a Playwright login) instead of bouncing to a
-          login wall.
-        * ``target_pages`` (interior routes) are resolved against the base and
-          inspected together via ``scrape_bulk`` — webscraper logs in once and reuses the
-          session across them — so generated steps hit REAL interior screens, not
-          just the landing page.
+        Login-gated apps are reached by uploading a Playwright storage-state JSON
+        under the caller's upload prefix and naming it as
+        ``auth_config.storage_state_path``; the job row stores only that
+        reference, never the credential itself.
         """
-        import httpx
-        from w2v_common.clients import WebscraperClient
-        from w2v_common.clients._ssl import get_ssl_context
-
-        auth_config = config.get("auth_config")
+        auth_config = config.get("auth_config") or {}
+        storage_state = await self._storage_state_for(auth_config, tenant_id=tenant_id)
         urls, dropped = _interior_urls(target_url, config.get("target_pages") or [])
         if dropped:
             logger.warning(
@@ -701,32 +712,178 @@ class JobProcessor:
                 dropped,
             )
 
-        ws_client = WebscraperClient(
-            base_url=service_url("webscraper"),
-            license_token=effective_token or None,
-            ssl_context=get_ssl_context(),
-            licence_lane=self._webscraper_lane,
-        )
+        fetcher = PageFetcher()
         try:
-            # webscraper POST /api/scrape/bulk returns the rendered html inline —
-            # required for _page_from_scrape to derive headings/forms/selectors.
-            # Used for single AND multi URL (single → a one-element batch);
-            # _MAX_INSPECT_SCREENS keeps the batch far under MAX_BULK_URLS (100).
-            # post-load delay lets client-rendered SPAs hydrate before we snapshot the DOM
-            try:
-                responses = await ws_client.scrape_bulk(urls, auth_config=auth_config, delay=2.0)
-            except httpx.HTTPStatusError as exc:
-                # Unlike KagScrapeClient, a non-2xx RAISES; keep the degrade path
-                # (the same RuntimeError the old per-page ``.error`` check produced).
-                raise RuntimeError(f"Failed to crawl {target_url}: {exc}") from exc
-            pages = [_page_from_scrape(r) for r in responses if not r.error]
-            if not pages:
-                first_error = next((r.error for r in responses if r.error), "no pages returned")
-                raise RuntimeError(f"Failed to crawl {target_url}: {first_error}")
-            crawl_data = {"pages": pages, "url": target_url}
-            return asdict(self._adapter.from_web_crawl(crawl_data))
+            responses = await fetcher.fetch_pages(
+                urls,
+                javascript_enabled=bool(config.get("javascript_enabled", True)),
+                auth_config=auth_config,
+                storage_state=storage_state,
+            )
         finally:
-            await ws_client.close()
+            await fetcher.close()
+
+        pages = [_page_from_scrape(r) for r in responses if not r.error]
+        if not pages:
+            first_error = next((r.error for r in responses if r.error), "no pages returned")
+            raise RuntimeError(f"Failed to fetch {target_url}: {first_error}")
+        crawl_data = {"pages": pages, "url": target_url}
+        return asdict(self._adapter.from_web_crawl(crawl_data))
+
+    async def _resolve_gherkin_upload_input(
+        self, *, config: dict[str, Any], tenant_id: str | None
+    ) -> dict[str, Any]:
+        """Parse caller-uploaded feature files into a synthetic inspection result.
+
+        ``feature_files`` is caller-supplied verbatim from the request body, so
+        each entry is confined to the CALLER's own upload prefix
+        (``uploads/{tenant_id}/``) by the storage chokepoint. A reference naming
+        another tenant's upload reads as absent and is skipped; ``tenant_id`` is
+        threaded from the request (never read off ``request.state`` down here)
+        and an absent tenant refuses everything.
+        """
+        feature_files = config.get("feature_files", [])
+        all_features: list[dict[str, Any]] = []
+        # ⚠️ COUNT the refs that contributed nothing. ``retrieve_text`` returns
+        # ``None`` for an absent/unreadable/cross-tenant ref and ``""`` for an
+        # empty object; the old ``if text:`` collapsed both into a silent
+        # ``continue``. A REFUSED ref is logged inside ``storage_service.retrieve``,
+        # but a genuine MISS is not, and neither reached the job row or the
+        # caller — so a job whose every upload was dropped ran on an EMPTY
+        # corpus, let the generator invent the content, and completed green.
+        # Counting is the whole fix: it does not fail the job (no comparable case
+        # in this method does), it makes the loss expressible and loud.
+        dropped_refs = 0
+        for path in feature_files:
+            text = await self._storage.retrieve_text(path, tenant_id=tenant_id or "")
+            if not text:
+                dropped_refs += 1
+                continue
+            parsed = self._parser.parse_feature_text(text)
+            all_features.append(parsed.model_dump())
+        if dropped_refs:
+            logger.warning(
+                "gherkin_upload: %d of %d feature_files refs were unreadable, absent, "
+                "empty, or outside this tenant's upload prefix and contributed NO "
+                "content (tenant=%s)",
+                dropped_refs,
+                len(feature_files),
+                tenant_id or "<unset>",
+            )
+        # Build a synthetic inspection result from parsed features. The two
+        # counters ride along into ``job.inspection_data`` (the row field this
+        # dict is persisted to) so the loss is auditable per job and readable
+        # through /result, not only in a pod log line.
+        return {
+            "pages": [],
+            "navigation_graph": [],
+            "platform": "web",
+            "base_url": "",
+            "parsed_features": all_features,
+            "requested_feature_refs": len(feature_files),
+            "dropped_feature_refs": dropped_refs,
+        }
+
+    async def _resolve_mobile_app_input(
+        self, *, app_path: str, effective_token: str
+    ) -> dict[str, Any]:
+        """Inspect a mobile app through ``app_inspector_service`` (legacy path)."""
+        from src.services.input.app_inspector_client import AppInspectorClient
+
+        client = AppInspectorClient(service_url("app_inspector"), license_token=effective_token)
+        try:
+            insp_job_id = await client.start_inspection(app_path)
+            insp_data = await client.wait_for_inspection(insp_job_id)
+            result = self._adapter.from_mobile_inspection(insp_data)
+            return asdict(result)
+        finally:
+            await client.close()
+
+    async def _storage_state_for(
+        self,
+        auth_config: dict[str, Any],
+        *,
+        tenant_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Read a Playwright storage-state JSON from the caller's upload prefix.
+
+        ``storage_state_path`` is a storage reference (the same tenant-confinement
+        chokepoint as ``feature_files``); a reference that resolves outside the
+        caller's prefix reads as absent and the job fails loudly.
+        """
+        ref = auth_config.get("storage_state_path")
+        if not ref:
+            return None
+        if not tenant_id:
+            raise RuntimeError(
+                "auth_config.storage_state_path requires a tenant identity on the request"
+            )
+        text = await self._storage.retrieve_text(str(ref), tenant_id=tenant_id)
+        if not text:
+            raise RuntimeError(
+                f"storage_state_path {ref!r} is absent, empty, or outside this tenant's uploads"
+            )
+        try:
+            state = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"storage_state_path {ref!r} is not valid JSON: {exc}") from exc
+        if not isinstance(state, dict) or not isinstance(state.get("cookies"), list):
+            raise RuntimeError(
+                f"storage_state_path {ref!r} must hold a Playwright storage-state object "
+                "(with a 'cookies' list)"
+            )
+        return state
+
+    async def _resolve_html_snapshot_input(
+        self,
+        *,
+        config: dict[str, Any],
+        tenant_id: str | None,
+    ) -> dict[str, Any]:
+        """Inspect caller-captured pages from an uploaded ``html_snapshot_path``.
+
+        The snapshot is a JSON list of ``{url, html, title?, text?, links?,
+        images?}`` entries — exactly what a Playwright capture writes — so an
+        authenticated or VPN-only app can be inspected without the cluster
+        reaching it. Structure is derived by the same ``extract_structure`` the
+        live-fetch path uses.
+        """
+        ref = config.get("html_snapshot_path")
+        if not ref:
+            raise RuntimeError("html_snapshot_path is required for html_snapshot input")
+        if not tenant_id:
+            raise RuntimeError("html_snapshot_path requires a tenant identity on the request")
+        text = await self._storage.retrieve_text(str(ref), tenant_id=tenant_id)
+        if not text:
+            raise RuntimeError(
+                f"html_snapshot_path {ref!r} is absent, empty, or outside this tenant's uploads"
+            )
+        try:
+            entries = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"html_snapshot_path {ref!r} is not valid JSON: {exc}") from exc
+        if not isinstance(entries, list):
+            raise RuntimeError(f"html_snapshot_path {ref!r} must hold a JSON list of pages")
+        if len(entries) > _MAX_INSPECT_SCREENS:
+            logger.warning(
+                "html_snapshot capped at %d pages; dropped %d",
+                _MAX_INSPECT_SCREENS,
+                len(entries) - _MAX_INSPECT_SCREENS,
+            )
+            entries = entries[:_MAX_INSPECT_SCREENS]
+
+        pages: list[dict[str, Any]] = []
+        for entry in entries:
+            page = _snapshot_entry_page(entry)
+            if page is not None:
+                pages.append(page)
+        if not pages:
+            raise RuntimeError(
+                f"html_snapshot_path {ref!r} contains no usable pages "
+                "(each entry needs a non-empty 'url' and 'html')"
+            )
+        crawl_data = {"pages": pages, "url": pages[0]["url"]}
+        return asdict(self._adapter.from_web_crawl(crawl_data))
 
     async def _resolve_input(
         self,
@@ -740,12 +897,12 @@ class JobProcessor:
     ) -> dict[str, Any]:
         """Resolve input source into normalized inspection data.
 
-        ``license_token`` (the request-scoped license token) is forwarded to
-        downstream peer-service clients (webscraper, app_inspector) so they
-        authenticate via ``X-Tenant-Id: Bearer <token>`` rather than relying
-        on the trusted-network fallback. Falls back to the static
-        ``settings.downstream.license_token`` for back-compat when the
-        request-scoped token is not available (e.g. background reprocessing).
+        ``license_token`` (the request-scoped license token) is forwarded to the
+        remaining downstream peer client (app_inspector) so it authenticates via
+        ``X-Tenant-Id: Bearer <token>`` rather than relying on the trusted-network
+        fallback. Falls back to the static ``settings.downstream.license_token``
+        for back-compat when the request-scoped token is not available (e.g.
+        background reprocessing).
         """
         effective_token = license_token or getattr(self._settings.downstream, "license_token", "")
         if input_type == "knowledge":
@@ -755,70 +912,19 @@ class JobProcessor:
             return await self._resolve_web_url_input(
                 target_url=target_url,
                 config=config,
-                effective_token=effective_token,
+                tenant_id=tenant_id,
             )
 
-        if input_type == "mobile_app":
-            from src.services.input.app_inspector_client import AppInspectorClient
+        if input_type == "html_snapshot":
+            return await self._resolve_html_snapshot_input(config=config, tenant_id=tenant_id)
 
-            client = AppInspectorClient(service_url("app_inspector"), license_token=effective_token)
-            try:
-                insp_job_id = await client.start_inspection(app_path)
-                insp_data = await client.wait_for_inspection(insp_job_id)
-                result = self._adapter.from_mobile_inspection(insp_data)
-                return asdict(result)
-            finally:
-                await client.close()
+        if input_type == "mobile_app":
+            return await self._resolve_mobile_app_input(
+                app_path=app_path, effective_token=effective_token
+            )
 
         if input_type == "gherkin_upload":
-            # ``feature_files`` is caller-supplied verbatim from the request body,
-            # so each entry is confined to the CALLER's own upload prefix
-            # (``uploads/{tenant_id}/``) by the storage chokepoint. A reference
-            # naming another tenant's upload reads as absent and is skipped;
-            # ``tenant_id`` is threaded from the request (never read off
-            # ``request.state`` down here) and an absent tenant refuses everything.
-            feature_files = config.get("feature_files", [])
-            all_features: list[dict[str, Any]] = []
-            # ⚠️ COUNT the refs that contributed nothing. ``retrieve_text``
-            # returns ``None`` for an absent/unreadable/cross-tenant ref and
-            # ``""`` for an empty object; the old ``if text:`` collapsed both
-            # into a silent ``continue``. A REFUSED ref is logged inside
-            # ``storage_service.retrieve``, but a genuine MISS is not, and
-            # neither reached the job row or the caller — so a job whose every
-            # upload was dropped ran on an EMPTY corpus, let the generator
-            # invent the content, and completed green. Counting is the whole
-            # fix: it does not fail the job (no comparable case in this method
-            # does), it makes the loss expressible and loud.
-            dropped_refs = 0
-            for path in feature_files:
-                text = await self._storage.retrieve_text(path, tenant_id=tenant_id or "")
-                if not text:
-                    dropped_refs += 1
-                    continue
-                parsed = self._parser.parse_feature_text(text)
-                all_features.append(parsed.model_dump())
-            if dropped_refs:
-                logger.warning(
-                    "gherkin_upload: %d of %d feature_files refs were unreadable, absent, "
-                    "empty, or outside this tenant's upload prefix and contributed NO "
-                    "content (tenant=%s)",
-                    dropped_refs,
-                    len(feature_files),
-                    tenant_id or "<unset>",
-                )
-            # Build a synthetic inspection result from parsed features. The two
-            # counters ride along into ``job.inspection_data`` (the row field
-            # this dict is persisted to) so the loss is auditable per job and
-            # readable through /result, not only in a pod log line.
-            return {
-                "pages": [],
-                "navigation_graph": [],
-                "platform": "web",
-                "base_url": "",
-                "parsed_features": all_features,
-                "requested_feature_refs": len(feature_files),
-                "dropped_feature_refs": dropped_refs,
-            }
+            return await self._resolve_gherkin_upload_input(config=config, tenant_id=tenant_id)
 
         if input_type == "inspection_passthrough":
             inspection_job_id = config.get("inspection_job_id", "")

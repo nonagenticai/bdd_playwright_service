@@ -12,6 +12,7 @@ from src.services.generation.feature_generator import FeatureGenerator
 from src.services.generation.step_def_generator import StepDefGenerator
 from src.services.input.gherkin_parser import GherkinParser
 from src.services.input.inspection_adapter import InspectionAdapter
+from src.services.input.page_fetcher import FetchedPage
 from src.services.job_processor import JobProcessor, _interior_urls
 from src.services.package_builder import PackageBuilder
 from src.services.storage_service import StorageService
@@ -32,6 +33,22 @@ def _unvouched_tenant_error() -> UnvouchedTenantError:
     assert isinstance(exc, ValueError)
     assert not isinstance(exc, OSError | RuntimeError)
     return exc
+
+
+class _FakeFetcher:
+    """Stand-in for ``PageFetcher``: records its calls, returns canned pages."""
+
+    def __init__(self, pages: list[FetchedPage] | None = None) -> None:
+        self.pages = pages or []
+        self.calls: list[tuple[list[str], dict[str, object]]] = []
+        self.closed = False
+
+    async def fetch_pages(self, urls, **kwargs) -> list[FetchedPage]:
+        self.calls.append((list(urls), kwargs))
+        return self.pages
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 def _make_mock_job(
@@ -868,35 +885,25 @@ def test_page_from_scrape_derives_structure_from_html():
 class TestResolveInput:
     @pytest.mark.usefixtures("_patch_llm")
     async def test_resolve_input_web_url(self):
-        """web_url input type uses WebscraperClient to scrape the target URL."""
-        from w2v_common.clients.webscraper import ScrapeResponse
-
+        """web_url input type fetches pages in-process via PageFetcher."""
         processor = JobProcessor()
-
-        scrape_response = ScrapeResponse(
-            url="https://example.com",
-            title="Example",
-            html="<html></html>",
-            text="Example text",
-            links=[],
-            images=[],
+        fetcher = _FakeFetcher(
+            pages=[
+                FetchedPage(
+                    url="https://example.com",
+                    title="Example",
+                    html="<html></html>",
+                    text="Example text",
+                )
+            ]
         )
-        mock_ws = AsyncMock()
-        mock_ws.scrape_bulk = AsyncMock(return_value=[scrape_response])
-        mock_ws.close = AsyncMock()
 
         with (
-            patch("w2v_common.clients.WebscraperClient", return_value=mock_ws),
-            patch("w2v_common.clients._ssl.get_ssl_context", return_value=True),
-            patch.object(
-                InspectionAdapter,
-                "from_web_crawl",
-            ) as mock_from_web_crawl,
+            patch(f"{MODULE}.PageFetcher", return_value=fetcher),
+            patch.object(InspectionAdapter, "from_web_crawl") as mock_from_web_crawl,
             patch(f"{MODULE}.asdict", return_value={"pages": [], "platform": "web"}),
         ):
-            mock_result = MagicMock()
-            mock_from_web_crawl.return_value = mock_result
-
+            mock_from_web_crawl.return_value = MagicMock()
             result = await processor._resolve_input(
                 input_type="web_url",
                 target_url="https://example.com",
@@ -904,39 +911,25 @@ class TestResolveInput:
                 config={},
             )
 
-            # Single page, no auth → one scrape_bulk call over a
-            # one-element batch (webscraper returns html inline;
-            # auth forwarded even when None so a login-gated app is inspected authed).
-            mock_ws.scrape_bulk.assert_called_once_with(
-                ["https://example.com"], auth_config=None, delay=2.0
-            )
-            mock_ws.close.assert_awaited_once()
-            assert result == {"pages": [], "platform": "web"}
+        urls, kwargs = fetcher.calls[0]
+        assert urls == ["https://example.com"]
+        assert kwargs["javascript_enabled"] is True
+        assert kwargs["storage_state"] is None
+        assert fetcher.closed
+        assert result == {"pages": [], "platform": "web"}
 
-            # The built page dict must carry the page body under the canonical
-            # "text_content" key the adapter reads (was "text" → silently empty).
-            crawl_data = mock_from_web_crawl.call_args.args[0]
-            page = crawl_data["pages"][0]
-            assert page["text_content"] == "Example text"
-            assert "text" not in page
-
-    @pytest.mark.usefixtures("_patch_llm")
     async def test_resolve_input_web_url_forwards_auth(self):
-        """auth_config is forwarded to the scrape so a login-gated app is
-        inspected as an authenticated session (was dropped → login-wall scrape)."""
-        from w2v_common.clients.webscraper import ScrapeResponse
-
+        """auth_config.storage_state_path is read from this tenant's uploads and
+        handed to the fetcher, so a login-gated app is inspected authenticated."""
         processor = JobProcessor()
-        mock_ws = AsyncMock()
-        mock_ws.scrape_bulk = AsyncMock(
-            return_value=[ScrapeResponse(url="https://app.example.com", title="App", html="<x/>")]
+        state = {"cookies": [{"name": "session", "value": "x"}], "origins": []}
+        processor._storage.retrieve_text = AsyncMock(return_value=json.dumps(state))
+        fetcher = _FakeFetcher(
+            pages=[FetchedPage(url="https://app.example.com", title="App", html="<x/>")]
         )
-        mock_ws.close = AsyncMock()
-        auth = {"credential_id": "cred-123"}
 
         with (
-            patch("w2v_common.clients.WebscraperClient", return_value=mock_ws),
-            patch("w2v_common.clients._ssl.get_ssl_context", return_value=True),
+            patch(f"{MODULE}.PageFetcher", return_value=fetcher),
             patch.object(InspectionAdapter, "from_web_crawl", return_value=MagicMock()),
             patch(f"{MODULE}.asdict", return_value={"pages": [], "platform": "web"}),
         ):
@@ -944,30 +937,27 @@ class TestResolveInput:
                 input_type="web_url",
                 target_url="https://app.example.com",
                 app_path="",
-                config={"auth_config": auth},
+                config={"auth_config": {"storage_state_path": "uploads/t/state.json"}},
+                tenant_id="01950000-0000-7000-8000-000000000001",
             )
-            mock_ws.scrape_bulk.assert_called_once_with(
-                ["https://app.example.com"], auth_config=auth, delay=2.0
-            )
+
+        processor._storage.retrieve_text.assert_awaited_once_with(
+            "uploads/t/state.json", tenant_id="01950000-0000-7000-8000-000000000001"
+        )
+        _, kwargs = fetcher.calls[0]
+        assert kwargs["storage_state"] == state
 
     @pytest.mark.usefixtures("_patch_llm")
     async def test_resolve_input_web_url_multiscreen_bulk(self):
-        """target_pages → authed multi-screen scrape_bulk over resolved interior
-        URLs (webscraper logs in once, reuses the session), so steps hit real screens."""
-        from w2v_common.clients.webscraper import ScrapeResponse
-
+        """target_pages resolve to interior URLs; a failed page is dropped, not fatal."""
         processor = JobProcessor()
-        mock_ws = AsyncMock()
-        mock_ws.scrape_bulk = AsyncMock(
-            return_value=[
-                ScrapeResponse(url="https://app.example.com/", title="Home", html="<h/>"),
-                ScrapeResponse(url="https://app.example.com/board", title="Board", html="<b/>"),
-                # A failed interior page is dropped, not fatal.
-                ScrapeResponse(url="https://app.example.com/x", error="timeout"),
+        fetcher = _FakeFetcher(
+            pages=[
+                FetchedPage(url="https://app.example.com/", title="Home", html="<h/>"),
+                FetchedPage(url="https://app.example.com/board", title="Board", html="<b/>"),
+                FetchedPage(url="https://app.example.com/x", error="timeout"),
             ]
         )
-        mock_ws.close = AsyncMock()
-        auth = {"credential_id": "cred-123"}
         captured: dict[str, list] = {}
 
         def _capture(crawl_data):  # type: ignore[no-untyped-def]
@@ -975,8 +965,7 @@ class TestResolveInput:
             return MagicMock()
 
         with (
-            patch("w2v_common.clients.WebscraperClient", return_value=mock_ws),
-            patch("w2v_common.clients._ssl.get_ssl_context", return_value=True),
+            patch(f"{MODULE}.PageFetcher", return_value=fetcher),
             patch.object(InspectionAdapter, "from_web_crawl", side_effect=_capture),
             patch(f"{MODULE}.asdict", return_value={"pages": [], "platform": "web"}),
         ):
@@ -984,44 +973,32 @@ class TestResolveInput:
                 input_type="web_url",
                 target_url="https://app.example.com/",
                 app_path="",
-                config={
-                    "auth_config": auth,
-                    "target_pages": ["/board", "https://app.example.com/x"],
-                },
+                config={"target_pages": ["/board", "https://app.example.com/x"]},
             )
-            mock_ws.scrape_bulk.assert_called_once_with(
-                [
-                    "https://app.example.com/",
-                    "https://app.example.com/board",
-                    "https://app.example.com/x",
-                ],
-                auth_config=auth,
-                delay=2.0,
-            )
-            mock_ws.scrape_url.assert_not_called()
-            # The two OK screens flow into inspection; the errored one is dropped.
-            assert [p["url"] for p in captured["pages"]] == [
-                "https://app.example.com/",
-                "https://app.example.com/board",
-            ]
+
+        urls, _ = fetcher.calls[0]
+        assert urls == [
+            "https://app.example.com/",
+            "https://app.example.com/board",
+            "https://app.example.com/x",
+        ]
+        # The two OK screens flow into inspection; the errored one is dropped.
+        assert [p["url"] for p in captured["pages"]] == [
+            "https://app.example.com/",
+            "https://app.example.com/board",
+        ]
 
     @pytest.mark.usefixtures("_patch_llm")
-    async def test_resolve_input_web_url_passes_post_load_delay(self):
-        """The inspection scrape opts into a post-load delay so client-rendered
-        SPAs hydrate before we snapshot the DOM (networkidle is NOT used — it
-        times out / returns empty on live SPAs with analytics)."""
-        from w2v_common.clients.webscraper import ScrapeResponse
-
+    async def test_resolve_input_web_url_defaults_to_rendered_mode(self):
+        """Rendered (Chromium) mode is the default; the post-load hydration delay is
+        a fetcher setting (BDD_FETCH_POST_LOAD_DELAY_SECONDS), not a per-call arg."""
         processor = JobProcessor()
-        mock_ws = AsyncMock()
-        mock_ws.scrape_bulk = AsyncMock(
-            return_value=[ScrapeResponse(url="https://spa.example.com", title="SPA", html="<x/>")]
+        fetcher = _FakeFetcher(
+            pages=[FetchedPage(url="https://spa.example.com", title="SPA", html="<x/>")]
         )
-        mock_ws.close = AsyncMock()
 
         with (
-            patch("w2v_common.clients.WebscraperClient", return_value=mock_ws),
-            patch("w2v_common.clients._ssl.get_ssl_context", return_value=True),
+            patch(f"{MODULE}.PageFetcher", return_value=fetcher),
             patch.object(InspectionAdapter, "from_web_crawl", return_value=MagicMock()),
             patch(f"{MODULE}.asdict", return_value={"pages": [], "platform": "web"}),
         ):
@@ -1032,7 +1009,9 @@ class TestResolveInput:
                 config={},
             )
 
-        assert mock_ws.scrape_bulk.call_args.kwargs["delay"] == 2.0
+        _, kwargs = fetcher.calls[0]
+        assert kwargs["javascript_enabled"] is True
+        assert "delay" not in kwargs
 
     @pytest.mark.usefixtures("_patch_llm")
     async def test_resolve_input_gherkin_upload(self, tmp_path: object):

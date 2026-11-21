@@ -305,7 +305,7 @@ class TestDemoVideoRoute:
         """auth_config from the request body must reach JobManager.create_job in config."""
         _, _mock_session = mock_db_ctx
         mock_job = _make_mock_job(job_id="vid-789", stream="demo_video")
-        auth_config = {"login_url": "https://fr.nonagentic.ai/", "type": "form"}
+        auth_config = {"storage_state_path": "uploads/t/state.json"}
 
         with patch(
             "src.api.routes.demo_video.JobManager.create_job",

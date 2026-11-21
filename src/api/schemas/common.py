@@ -8,7 +8,9 @@ from pydantic import BaseModel
 
 JobStatus = Literal["pending", "processing", "completed", "failed"]
 StreamType = Literal["qa_suite", "accessibility", "documentation", "demo_video"]
-InputType = Literal["web_url", "mobile_app", "gherkin_upload", "inspection_passthrough"]
+InputType = Literal[
+    "web_url", "html_snapshot", "mobile_app", "gherkin_upload", "inspection_passthrough"
+]
 NarrationTone = Literal["tutorial", "demo", "marketing", "technical"]
 
 
