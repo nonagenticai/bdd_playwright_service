@@ -25,6 +25,8 @@ def _detect_input_type(request_body: DemoVideoRequest) -> tuple[str, str | None,
         return "knowledge", None, None
     if request_body.url:
         return "web_url", request_body.url, None
+    if request_body.html_snapshot_path:
+        return "html_snapshot", None, None
     if request_body.app_path:
         return "mobile_app", None, request_body.app_path
     if request_body.feature_files:
@@ -33,7 +35,10 @@ def _detect_input_type(request_body: DemoVideoRequest) -> tuple[str, str | None,
         return "inspection_passthrough", None, None
     raise HTTPException(
         status_code=400,
-        detail="At least one input source is required: knowledge, url, app_path, feature_files, or inspection_job_id",
+        detail=(
+            "At least one input source is required: knowledge, url, html_snapshot_path, "
+            "app_path, feature_files, or inspection_job_id"
+        ),
     )
 
 
@@ -54,6 +59,7 @@ async def start_demo_video(request_body: DemoVideoRequest, request: Request) -> 
 
     config = {
         "target_pages": request_body.target_pages,
+        "javascript_enabled": request_body.javascript_enabled,
         "focus_areas": request_body.focus_areas,
         "max_scenarios_per_feature": request_body.max_scenarios_per_feature,
         "min_scenarios": request_body.min_scenarios,
@@ -61,6 +67,7 @@ async def start_demo_video(request_body: DemoVideoRequest, request: Request) -> 
         "narration_words_target": request_body.narration_words_target,
         "narration_words_per_scenario": request_body.narration_words_per_scenario,
         "feature_files": request_body.feature_files,
+        "html_snapshot_path": request_body.html_snapshot_path,
         "inspection_job_id": request_body.inspection_job_id,
         "feed_to_video": request_body.feed_to_video,
         "auth_config": request_body.auth_config,

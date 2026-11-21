@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from src.api.schemas.common import LLMConfigOverride, NarrationConfig
 from src.api.schemas.gherkin import FeatureFileInfo, StepDefFileInfo
 from src.api.schemas.narration import NarrationScriptOutput
+from src.services.input.page_fetcher import PageFetchError, validate_auth_config
 
 
 class DemoVideoRequest(BaseModel):
@@ -16,6 +17,7 @@ class DemoVideoRequest(BaseModel):
 
     # Input source (one required)
     url: str | None = None
+    html_snapshot_path: str | None = None
     app_path: str | None = None
     feature_files: list[str] | None = None
     inspection_job_id: str | None = None
@@ -29,6 +31,7 @@ class DemoVideoRequest(BaseModel):
 
     # Configuration
     target_pages: list[str] | None = None
+    javascript_enabled: bool = True
     focus_areas: list[str] | None = None
     max_scenarios_per_feature: int = Field(default=10, ge=1, le=50)
     # THE MINIMUM number of distinct recorded scenarios the caller needs, sent by the
@@ -87,6 +90,15 @@ class DemoVideoRequest(BaseModel):
 
     # LLM override
     llm_config: LLMConfigOverride | None = None
+
+    @model_validator(mode="after")
+    def _reject_secret_bearing_auth_config(self) -> Self:
+        """Reject credential-shaped keys before they are persisted on the job row."""
+        try:
+            validate_auth_config(self.auth_config)
+        except PageFetchError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
 
 
 class DemoVideoResult(BaseModel):

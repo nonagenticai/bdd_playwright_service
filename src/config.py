@@ -75,6 +75,35 @@ class RateLimitSettings(BaseSettings):
     )
 
 
+class FetchSettings(BaseSettings):
+    """In-service page fetcher (the self-contained replacement for webscraper)."""
+
+    timeout_seconds: float = Field(
+        default=30.0, description="Per-page navigation deadline in seconds"
+    )
+    post_load_delay_seconds: float = Field(
+        default=2.0,
+        description="Dwell after load so client-rendered SPAs hydrate before the DOM snapshot",
+    )
+    max_bytes: int = Field(default=2_000_000, description="Largest HTML page accepted, in bytes")
+    max_pages: int = Field(default=20, description="Largest batch accepted, in pages")
+    allow_private: bool = Field(
+        default=False,
+        description=(
+            "Allow RFC1918/ULA targets. Off by default: an in-cluster browser pointed at "
+            "arbitrary caller URLs must not reach the pod network unless the operator opts in"
+        ),
+    )
+    user_agent: str = Field(
+        default="bdd-playwright-service/0.1 (page inspection)",
+        description="Default User-Agent for fetched pages",
+    )
+
+    model_config = SettingsConfigDict(
+        env_prefix="BDD_FETCH_", env_file=".env", case_sensitive=False, extra="ignore"
+    )
+
+
 class CleanupSettings(BaseSettings):
     """Job cleanup configuration."""
 
@@ -113,6 +142,7 @@ class Settings(BaseSettings):
     downstream: DownstreamSettings = Field(default_factory=DownstreamSettings)
     generation: GenerationSettings = Field(default_factory=GenerationSettings)
     narration: NarrationSettings = Field(default_factory=NarrationSettings)
+    fetch: FetchSettings = Field(default_factory=FetchSettings)
     rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     cleanup: CleanupSettings = Field(default_factory=CleanupSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

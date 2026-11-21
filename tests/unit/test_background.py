@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.services import background
 from src.services.task_identity import TaskIdentity
@@ -254,34 +254,53 @@ async def test_process_job_bg_cancellation_marks_failed_and_reraises(monkeypatch
     assert marked[0][0] == "job-cancelled"
 
 
-async def test_webscraper_hop_is_not_metered_and_never_fails_closed(monkeypatch):
-    """Inverse of the KAG-era guard: webscraper is NOT a metered destination.
+async def test_web_inspection_does_not_call_a_peer_service(monkeypatch):
+    """Self-containment guard: web_url resolution must not resolve a peer URL.
 
-    Web inspection used to go through KAG, a metered peer, so a provenance gap in
-    the detached job failed the scrape closed. webscraper (which replaced the KAG
-    hop) is not metered: even with UNRECORDED provenance the outbound hook lets a
-    service-credentialed request through and stamps no delegated tenant.
+    The old hop built ``WebscraperClient(service_url('webscraper'))``; that
+    service is retired and the fetch now runs in-process (Chromium or httpx).
+    A regression here would silently re-introduce the dead dependency, and the
+    failure would surface as a connection error at job time.
     """
-    import httpx
-    from w2v_common.auth import clear_identity_context, set_identity_context
-    from w2v_common.auth.identity_context import identity_event_hook
-    from w2v_common.auth.outbound import EFFECTIVE_TENANT_HEADER, is_metered_destination
-    from w2v_common.discovery import service_url
+    from src.services import job_processor as jp
 
-    webscraper_url = f"{service_url('webscraper').rstrip('/')}/api/scrape/bulk"
-    assert not is_metered_destination(webscraper_url), "webscraper must not be metered"
+    seen: list[str] = []
+    real_service_url = jp.service_url
 
-    clear_identity_context()
-    set_identity_context(TENANT_A, None, None)  # provenance unrecorded
-    try:
-        request = httpx.Request(
-            "POST",
-            webscraper_url,
-            headers={"X-Tenant-Id": "Bearer sa-token"},  # pragma: allowlist secret
+    def _spy(name: str) -> str:
+        seen.append(name)
+        return real_service_url(name)
+
+    fetcher = MagicMock()
+    fetcher.fetch_pages = AsyncMock(
+        return_value=[jp.FetchedPage(url="https://example.com", html="<html/>")]
+    )
+    fetcher.close = AsyncMock()
+
+    settings = MagicMock()
+    settings.downstream.license_token = "tok"  # pragma: allowlist secret
+    settings.narration.words_per_minute = 150
+
+    monkeypatch.setattr(jp, "service_url", _spy)
+    with (
+        patch("src.services.job_processor.get_settings", return_value=settings),
+        patch("src.services.job_processor.LLMClient"),
+        patch("src.services.job_processor.FeatureGenerator"),
+        patch("src.services.job_processor.StepDefGenerator"),
+        patch("src.services.job_processor.StorageService"),
+        patch("src.services.job_processor.PackageBuilder"),
+        patch("src.services.job_processor.NarrationHumanizer"),
+        patch("src.services.job_processor.PageFetcher", return_value=fetcher),
+        patch("src.services.job_processor.asdict", return_value={"pages": []}),
+    ):
+        processor = jp.JobProcessor()
+        processor._adapter.from_web_crawl = MagicMock(return_value=MagicMock())
+        await processor._resolve_input(
+            input_type="web_url",
+            target_url="https://example.com",
+            app_path="",
+            config={},
         )
-        await identity_event_hook(request)  # must not raise UnvouchedTenantError
-    finally:
-        clear_identity_context()
 
-    assert EFFECTIVE_TENANT_HEADER not in request.headers
-    assert request.headers["X-Tenant-Id"] == "Bearer sa-token"  # pragma: allowlist secret
+    assert "webscraper" not in seen
+    fetcher.close.assert_awaited_once()

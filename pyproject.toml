@@ -7,31 +7,18 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "fastapi[all]>=0.135.0",
-
     "uvicorn[standard]>=0.41.0",
-
     "psycopg[binary,pool]>=3.3.0",
-
     "sqlalchemy[asyncio]>=2.0.48",
-
     "pydantic>=2.12.0",
-
     "pydantic-settings>=2.14.2",  # GHSA-4xgf-cpjx-pc3j fixed in 2.14.2
-
     "python-dotenv>=1.2.0",
-
     "redis>=7.3.0",
-
     "alembic>=1.18.0",
-
     "httpx>=0.28.0",
-
     "cachetools>=7.0.0",
-
     "pyyaml>=6.0.3",
-
     "jinja2>=3.1.6",
-
     # >=0.39.0 for the storage facade's streaming put_file + range-aware
     # get_object_stream (used to store/serve the package zip without buffering
     # it in memory).
@@ -43,12 +30,10 @@ dependencies = [
     # >=0.106.0 for ``w2v_common.clients.WebscraperClient`` — web_url inspection
     # calls webscraper directly now that KAG is retired.
     "w2v-common>=0.106.0",
-
     # MinIO shared artifact storage so generated BDD packages survive across
     # replicas (the download route lands on any pod). The w2v_common storage
     # facade imports miniopy-async lazily, so the consumer declares it.
     "miniopy-async>=1.23.0",
-
     # --- Security floors on transitive dependencies ---
     # Neither of these is imported by this service directly; both arrive through
     # other pins — aiohttp via `miniopy-async` (directly, and again through its
@@ -65,6 +50,7 @@ dependencies = [
     # cryptography: CVE-2026-69247 (GHSA-g6cj-pr64-35w5) was introduced in
     # 44.0.0 and fixed in 50.0.0, so the previously-locked 49.0.0 was affected.
     "cryptography>=50.0.0",
+    "playwright>=1.55",
 ]
 
 [project.scripts]
