@@ -37,6 +37,8 @@ EXPECTED_OPERATION_IDS: frozenset[str] = frozenset(
         "start_bdd_demo_video",
         # gherkin upload
         "upload_bdd_gherkin_features",
+        # html snapshot upload (the crawl's replacement)
+        "upload_bdd_html_snapshot",
         # jobs + packages
         "get_bdd_job_status",
         "get_bdd_job_result",

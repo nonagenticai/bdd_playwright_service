@@ -74,6 +74,12 @@ collide across the fleet.
 |--------|------------------|---------------------------------|---------------------------------------------------------------------------------|
 | POST   | `upload_gherkin` | `upload_bdd_gherkin_features`   | Generic `upload_*` collides at fleet scope; `bdd_gherkin_features` is specific. |
 
+### `src/api/routes/snapshot.py` (tag: `bdd`)
+
+| Method | Function         | operation_id                  | Rationale                                                                              |
+|--------|------------------|-------------------------------|----------------------------------------------------------------------------------------|
+| POST   | `upload_snapshot`| `upload_bdd_html_snapshot`    | Sibling of the gherkin upload; `bdd_html_snapshot` names the payload, not the verb.    |
+
 ### `src/api/routes/jobs.py` (tag: `bdd`)
 
 | Method | Function          | operation_id          | Rationale                                                                          |
