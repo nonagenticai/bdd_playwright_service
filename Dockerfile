@@ -1,7 +1,7 @@
 # Multi-stage Dockerfile for bdd_playwright_service
 #
-# Single-context build: w2v-common is resolved from pypiserver.test
-# via the uv.lock file (which pins w2v-common to the pypiserver-internal index).
+# Single-context build. w2v-common is pinned in uv.lock to a git source on
+# GitHub, so the builder stage needs git as well as the C toolchain.
 # Build with: docker buildx build -f Dockerfile .
 
 ARG BASE_REGISTRY=docker.io
@@ -26,13 +26,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     curl \
     ca-certificates \
+    git \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy dependency manifests first for layer caching
 COPY pyproject.toml uv.lock README.md ./
 
-# Resolve and install deps; w2v-common comes from pypiserver.test
+# Resolve and install deps; w2v-common is fetched from its pinned git tag.
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Now copy source and install the project itself
