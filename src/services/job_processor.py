@@ -101,6 +101,12 @@ def _auth_config_from_pack(auth: dict[str, Any]) -> dict[str, Any]:
 
 _MAX_INSPECT_SCREENS = 20
 
+# Per-page ceiling for a caller-uploaded HTML snapshot. A rendered admin page is
+# typically 50-300 KB; 2 MB admits a heavy one and still refuses a payload that
+# would blow the job's memory or the LLM prompt (the structure extractor caps
+# what reaches the model, but the raw html is persisted on the page dict).
+_MAX_SNAPSHOT_HTML_BYTES = 2_000_000
+
 
 def _interior_urls(base_url: str, target_pages: list[str]) -> tuple[list[str], int]:
     """Absolute interior URLs to inspect: the landing page first, then each
@@ -168,6 +174,54 @@ def _page_from_scrape(response: Any) -> dict[str, Any]:
         "headings_truncated": structure["headings_truncated"],
         # The id/class/testid inventory the assertion-grounding pass judges CSS
         # selectors against. `None` = the DOM was not fully scanned.
+        "dom_tokens": structure["dom_tokens"],
+    }
+
+
+def _page_from_snapshot(raw: dict[str, Any], *, index: int) -> dict[str, Any]:
+    """One inspection ``pages[]`` entry from a caller-uploaded HTML snapshot.
+
+    ``webscraper_service`` is retired, so the caller renders the page (Playwright)
+    and ships the DOM instead. Everything downstream reads is derived HERE, from
+    the same :func:`extract_structure` call ``_page_from_scrape`` uses — a
+    snapshot page and a crawled page are indistinguishable to the generators.
+
+    ``text_content`` must come from the caller (``document.body.innerText``):
+    the grounding pass judges assertions against real rendered text, and deriving
+    it from the raw HTML here would re-introduce script/style noise.
+    """
+    url = raw.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise RuntimeError(f"html_snapshot page #{index} has no 'url'")
+    html = raw.get("html")
+    if not isinstance(html, str) or not html.strip():
+        raise RuntimeError(f"html_snapshot page {url!r} has no 'html'")
+    if len(html.encode("utf-8")) > _MAX_SNAPSHOT_HTML_BYTES:
+        raise RuntimeError(
+            f"html_snapshot page {url!r} exceeds {_MAX_SNAPSHOT_HTML_BYTES} bytes of html"
+        )
+    structure = extract_structure(html)
+    title = raw.get("title")
+    text = raw.get("text")
+    links = raw.get("links")
+    return {
+        "url": url.strip(),
+        "title": title if isinstance(title, str) else "",
+        "html": html,
+        "text_content": text if isinstance(text, str) else "",
+        "links": [link for link in links if isinstance(link, str)]
+        if isinstance(links, list)
+        else [],
+        "images": [],
+        "headings": structure["headings"],
+        "has_forms": structure["has_forms"],
+        "interactive_elements": structure["interactive_elements"],
+        "page_type": structure["page_type"],
+        # Truncation counters ride along for the same reason as in
+        # `_page_from_scrape`: absence in a CAPPED list is not evidence of absence,
+        # and the grounding pass deletes assertions that name absent elements.
+        "elements_truncated": structure["elements_truncated"],
+        "headings_truncated": structure["headings_truncated"],
         "dom_tokens": structure["dom_tokens"],
     }
 
@@ -728,6 +782,86 @@ class JobProcessor:
         finally:
             await ws_client.close()
 
+    async def _resolve_html_snapshot_input(
+        self,
+        *,
+        config: dict[str, Any],
+        tenant_id: str,
+    ) -> dict[str, Any]:
+        """Inspect caller-uploaded HTML pages — the crawl's replacement.
+
+        The caller renders (Playwright, or curl behind a login) and uploads
+        ``[{url, html, title?, text?, links?}]`` to ``uploads/{tenant_id}/``; this
+        method derives the SAME inspection a ``webscraper`` crawl produced, via
+        the shared :func:`_page_from_snapshot` → :func:`extract_structure` →
+        ``from_web_crawl`` path. No peer service is called, so generation works
+        with webscraper retired and never needs network access to the app under
+        test.
+
+        Confinement: ``retrieve_text`` returns ``None`` for a path outside this
+        tenant's upload prefix, which surfaces here as a hard failure rather than
+        an empty inspection the feature generator would happily invent from.
+        """
+        path = config.get("html_snapshot_path") or ""
+        if not path:
+            raise RuntimeError("html_snapshot_path is required for input_type=html_snapshot")
+
+        raw_text = await self._storage.retrieve_text(path, tenant_id=tenant_id)
+        if not raw_text:
+            raise RuntimeError(
+                f"html_snapshot: {path!r} is absent, empty, or outside uploads/{tenant_id}/"
+            )
+        try:
+            raw_pages = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"html_snapshot: {path!r} is not valid JSON: {exc}") from exc
+        if not isinstance(raw_pages, list) or not raw_pages:
+            raise RuntimeError("html_snapshot: expected a non-empty JSON array of pages")
+        if len(raw_pages) > _MAX_INSPECT_SCREENS:
+            raise RuntimeError(
+                f"html_snapshot: at most {_MAX_INSPECT_SCREENS} pages, got {len(raw_pages)}"
+            )
+        if not all(isinstance(page, dict) for page in raw_pages):
+            raise RuntimeError("html_snapshot: every entry must be an object")
+
+        pages = [_page_from_snapshot(page, index=i) for i, page in enumerate(raw_pages)]
+        logger.debug("html_snapshot: %d pages from %s", len(pages), path)
+        return asdict(
+            self._adapter.from_web_crawl(
+                {"pages": pages, "base_url": pages[0]["url"], "url": pages[0]["url"]}
+            )
+        )
+
+    async def _resolve_site_input(
+        self,
+        *,
+        input_type: str,
+        target_url: str,
+        config: dict[str, Any],
+        tenant_id: str | None,
+        effective_token: str,
+    ) -> dict[str, Any]:
+        """Resolve the two page-level site inputs into a crawl-shaped inspection.
+
+        ``web_url`` crawls a live site through webscraper; ``html_snapshot`` takes
+        the caller's rendered DOM instead (webscraper is retired). They live in one
+        method because they are the only two sources producing this inspection:
+        giving each its own branch in ``_resolve_input`` pushed that dispatcher past
+        ruff's C901 ceiling, and the house answer to that is to extract, never to
+        ``noqa``.
+        """
+        if input_type == "web_url":
+            return await self._resolve_web_url_input(
+                target_url=target_url,
+                config=config,
+                effective_token=effective_token,
+            )
+        if not tenant_id:
+            raise RuntimeError(
+                "html_snapshot input requires a tenant id (uploads/{tenant_id}/ confinement)"
+            )
+        return await self._resolve_html_snapshot_input(config=config, tenant_id=tenant_id)
+
     async def _resolve_input(
         self,
         *,
@@ -751,10 +885,12 @@ class JobProcessor:
         if input_type == "knowledge":
             return self._resolve_knowledge_input(config)
 
-        if input_type == "web_url":
-            return await self._resolve_web_url_input(
+        if input_type in ("web_url", "html_snapshot"):
+            return await self._resolve_site_input(
+                input_type=input_type,
                 target_url=target_url,
                 config=config,
+                tenant_id=tenant_id,
                 effective_token=effective_token,
             )
 

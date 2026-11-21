@@ -865,6 +865,38 @@ def test_page_from_scrape_derives_structure_from_html():
     assert empty["headings"] == []
 
 
+def test_page_from_snapshot_derives_structure_from_uploaded_html():
+    """A snapshot page yields the same inspection fields a crawl produced, and the
+    shapes that would silently degrade it are refused."""
+    from src.services.job_processor import _page_from_snapshot
+
+    page = _page_from_snapshot(
+        {
+            "url": "http://127.0.0.1:8321/g/demo",
+            "title": "Afspraak maken",
+            "html": (
+                "<h1>Uw gegevens</h1>"
+                '<form><label for="email">E-mailadres</label>'
+                '<input id="email" name="email"></form>'
+            ),
+            "text": "Uw gegevens E-mailadres",
+        },
+        index=0,
+    )
+    assert page["url"] == "http://127.0.0.1:8321/g/demo"
+    assert page["headings"] == ["Uw gegevens"]
+    assert page["has_forms"] is True
+    assert page["text_content"] == "Uw gegevens E-mailadres"
+    assert any(el["tag"] == "input" for el in page["interactive_elements"])
+
+    with pytest.raises(RuntimeError, match="has no 'url'"):
+        _page_from_snapshot({"html": "<h1>x</h1>"}, index=1)
+    with pytest.raises(RuntimeError, match="has no 'html'"):
+        _page_from_snapshot({"url": "http://x/"}, index=2)
+    with pytest.raises(RuntimeError, match="exceeds"):
+        _page_from_snapshot({"url": "http://x/", "html": "a" * 2_000_001}, index=3)
+
+
 class TestResolveInput:
     @pytest.mark.usefixtures("_patch_llm")
     async def test_resolve_input_web_url(self):
@@ -1073,6 +1105,74 @@ class TestResolveInput:
             )
             assert result["platform"] == "web"
             assert len(result["parsed_features"]) == 1
+
+    async def test_resolve_input_html_snapshot(self):
+        """html_snapshot reads the uploaded JSON and derives pages with no peer
+        service call — the crawl's replacement now that webscraper is retired."""
+        processor = JobProcessor()
+        snapshot = json.dumps(
+            [
+                {
+                    "url": "http://127.0.0.1:8321/g/demo",
+                    "title": "Demo",
+                    "html": "<h1>Maak een afspraak</h1>",
+                    "text": "Maak een afspraak",
+                },
+                {
+                    "url": "http://127.0.0.1:8321/g/demo/book",
+                    "title": "Gegevens",
+                    "html": '<h1>Uw gegevens</h1><input id="email">',
+                    "text": "Uw gegevens",
+                },
+            ]
+        )
+
+        with patch.object(
+            StorageService,
+            "retrieve_text",
+            new_callable=AsyncMock,
+            return_value=snapshot,
+        ) as mock_retrieve:
+            result = await processor._resolve_input(
+                input_type="html_snapshot",
+                target_url="",
+                app_path="",
+                config={"html_snapshot_path": "uploads/tenant-1/snapshot.json"},
+                tenant_id="01950000-0000-7000-8000-000000000001",
+            )
+
+        mock_retrieve.assert_called_once_with(
+            "uploads/tenant-1/snapshot.json", tenant_id="01950000-0000-7000-8000-000000000001"
+        )
+        assert len(result["pages"]) == 2
+        assert result["base_url"] == "http://127.0.0.1:8321/g/demo"
+        assert result["pages"][0]["headings"] == ["Maak een afspraak"]
+        assert result["pages"][1]["has_forms"] is True
+
+    async def test_resolve_input_html_snapshot_refuses_unreadable_path(self):
+        """A snapshot path outside the tenant prefix reads as absent, and that is a
+        hard failure — never an empty inspection the generator invents from."""
+        processor = JobProcessor()
+
+        with patch.object(
+            StorageService, "retrieve_text", new_callable=AsyncMock, return_value=None
+        ):
+            with pytest.raises(RuntimeError, match="absent, empty, or outside"):
+                await processor._resolve_input(
+                    input_type="html_snapshot",
+                    target_url="",
+                    app_path="",
+                    config={"html_snapshot_path": "uploads/other-tenant/snapshot.json"},
+                    tenant_id="01950000-0000-7000-8000-000000000001",
+                )
+            with pytest.raises(RuntimeError, match="requires a tenant id"):
+                await processor._resolve_input(
+                    input_type="html_snapshot",
+                    target_url="",
+                    app_path="",
+                    config={"html_snapshot_path": "uploads/other-tenant/snapshot.json"},
+                    tenant_id=None,
+                )
 
     @pytest.mark.usefixtures("_patch_llm")
     async def test_resolve_input_unknown_type(self):

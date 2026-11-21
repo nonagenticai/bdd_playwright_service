@@ -20,6 +20,7 @@ STREAM_DEMO_VIDEO = "demo_video"
 # Input types
 INPUT_WEB_URL = "web_url"
 INPUT_MOBILE_APP = "mobile_app"
+INPUT_HTML_SNAPSHOT = "html_snapshot"
 INPUT_GHERKIN_UPLOAD = "gherkin_upload"
 INPUT_INSPECTION_PASSTHROUGH = "inspection_passthrough"
 

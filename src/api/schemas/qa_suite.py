@@ -17,6 +17,10 @@ class QASuiteRequest(BaseModel):
     # Input source (one required)
     url: str | None = None
     app_path: str | None = None
+    # Caller-rendered HTML snapshot: a stored ``uploads/{tenant_id}/…json`` of
+    # ``[{url, html, title?, text?, links?}]``. The crawl's replacement now that
+    # webscraper is retired — the caller renders, this service extracts structure.
+    html_snapshot_path: str | None = None
     feature_files: list[str] | None = None
     inspection_job_id: str | None = None
 

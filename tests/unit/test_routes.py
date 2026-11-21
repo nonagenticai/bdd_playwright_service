@@ -167,6 +167,29 @@ class TestQASuiteRoute:
         assert response.status_code == 200
         assert response.json()["job_id"] == "qa-789"
 
+    def test_start_qa_suite_with_html_snapshot(self, client, mock_db_ctx):
+        """POST /api/bdd/qa-suite with html_snapshot_path creates an html_snapshot job
+        and carries the path into the job config (dropping it would silently fall back
+        to an empty inspection)."""
+        _, _mock_session = mock_db_ctx
+        mock_job = _make_mock_job(job_id="qa-snap", stream="qa_suite", input_type="html_snapshot")
+
+        with patch(
+            "src.api.routes.qa_suite.JobManager.create_job",
+            new_callable=AsyncMock,
+            return_value=mock_job,
+        ) as mock_create:
+            response = client.post(
+                "/api/bdd/qa-suite",
+                json={"html_snapshot_path": "uploads/t-1/snapshot.json"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["job_id"] == "qa-snap"
+        kwargs = mock_create.call_args.kwargs
+        assert kwargs["input_type"] == "html_snapshot"
+        assert kwargs["config"]["html_snapshot_path"] == "uploads/t-1/snapshot.json"
+
     def test_start_qa_suite_with_inspection_job_id(self, client, mock_db_ctx):
         """POST /api/bdd/qa-suite with inspection_job_id should create a job."""
         _, _mock_session = mock_db_ctx

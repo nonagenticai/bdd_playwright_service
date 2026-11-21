@@ -33,6 +33,7 @@ from src.api.routes.gherkin import router as gherkin_router
 from src.api.routes.jobs import router as jobs_router
 from src.api.routes.packages import router as packages_router
 from src.api.routes.qa_suite import router as qa_suite_router
+from src.api.routes.snapshot import router as snapshot_router
 
 router = APIRouter(prefix="/api/bdd", tags=["bdd"], dependencies=list(LICENSE_GATE))
 
@@ -43,3 +44,4 @@ router.include_router(documentation_router)
 router.include_router(demo_video_router)
 router.include_router(packages_router)
 router.include_router(gherkin_router)
+router.include_router(snapshot_router)
