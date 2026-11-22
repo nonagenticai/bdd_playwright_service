@@ -20,6 +20,10 @@ class InteractiveElement:
     selector: str = ""
     text: str = ""
     href: str = ""
+    #: ARIA role ("" when the tag has none). Declared here or ``asdict()`` drops
+    #: it on the web_url path — the grounded QA generator reads it to match
+    #: ``getByRole(role, {name})`` against the inventory.
+    role: str = ""
 
 
 @dataclass
@@ -174,6 +178,7 @@ class InspectionAdapter:
                     selector=el.get("selector", ""),
                     text=el.get("text", ""),
                     href=el.get("href", ""),
+                    role=el.get("role", ""),
                 )
                 for el in raw.get("interactive_elements", [])
             ]

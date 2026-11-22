@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -28,6 +28,15 @@ class QASuiteRequest(BaseModel):
     focus_areas: list[str] | None = None
     include_negative_tests: bool = True
     max_scenarios_per_feature: int = Field(default=10, ge=1, le=50)
+
+    #: ``grounded`` (default) builds deterministic page contracts from the captured
+    #: structure and validates every scenario against it; ``legacy`` keeps the old
+    #: LLM-authors-everything path. A job with ``auth_config`` always uses the
+    #: legacy path — the grounded vocabulary has no storage-state setup yet.
+    generation_mode: Literal["grounded", "legacy"] = "grounded"
+    #: Opt-in: let the LLM add scenarios to the grounded floor. They must use the
+    #: same closed vocabulary and are dropped if the snapshot cannot ground them.
+    include_llm_scenarios: bool = False
 
     # Authentication for login-gated sites
     auth_config: dict[str, Any] | None = None

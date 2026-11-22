@@ -29,6 +29,43 @@ The service is stateful and tenant-isolated. It persists jobs, usage, and narrat
 - **Downloadable artifacts** — `package_builder` and `storage_service` assemble and persist a self-contained playwright-bdd project to MinIO for one-request download
 - **Health and request tracing** — standard liveness/readiness probes plus a request-id middleware bind a correlation id before auth and handlers run
 
+## Grounded QA suites (`POST /api/bdd/qa-suite`)
+
+The QA stream defaults to **grounded** mode (`generation_mode: "grounded"`):
+
+- Features are generated deterministically from the captured page structure — one
+  page-contract scenario per captured page (open it, assert its heading, title,
+  landmarks and URL path) plus a navigation scenario for links whose target was
+  captured too. No absolute URLs: paths are resolved against `BASE_URL`.
+- Step definitions are a **static, closed vocabulary** (`src/templates/scaffold/qa/
+  steps.ts`), emitted verbatim. No LLM writes TypeScript on this path.
+- Every scenario — deterministic or opt-in LLM — is validated against the snapshot
+  before packaging. Scenarios asserting a heading/link/button/title/text the capture
+  does not contain, an absolute URL, an uncaptured path, or a step outside the
+  vocabulary are **dropped and reported** (`validation.json` in the package,
+  `step_coverage.grounding_validation` on the job). If nothing survives, the job
+  fails rather than shipping an empty suite.
+- The package config is QA-specific: `video: 'off'`, one chromium project,
+  `BASE_URL` overridable at run time.
+
+Run a generated package with:
+
+```bash
+npm install
+BASE_URL=https://your-app npx bddgen && npx playwright test
+```
+
+`include_llm_scenarios: true` lets the LLM add scenarios inside the same vocabulary;
+they are grounded and dropped under the same rules. Requests carrying `auth_config`
+(login-gated storage state) stay on `generation_mode: "legacy"` — the grounded
+vocabulary has no authenticated setup project yet. Business-state flows (expiry,
+retention, emailed confirmations) cannot be grounded in a snapshot and are
+hand-authored, not generated.
+
+The generated package's TypeScript is compiled in CI (`package-compile` in
+`.github/workflows/ci-public.yml`: `bddgen` + `tsc --noEmit` over a rendered
+package), because the service image has no Node runtime.
+
 ## Authentication
 
 Auth enabled by default (`AUTH_ENABLED=true`; k8s sets it explicitly). The `w2v_common` `AuthMiddleware` reads the license token from `X-Tenant-Id: Bearer <license_token>` — **not** the `Authorization` header, which is reserved for Keycloak JWTs from the SPA. Tokens are introspected against the licenses service and cached for 5 minutes (`cache_ttl=300`). A per-tenant `RateLimitMiddleware` runs ahead of auth.

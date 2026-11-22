@@ -598,3 +598,24 @@ class TestEveryProjectRecordsAtAnExplicitSize:
             assert _FIREFOX_PREF not in firefox
             assert _FIREFOX_DSF not in firefox
             assert "--force-device-scale-factor" not in firefox
+
+
+class TestQaSuiteConfig:
+    """The QA config is deliberately NOT the demo-video scaffold."""
+
+    def test_qa_config_is_fast_single_browser_and_portable(self):
+        cfg = _code(ConfigGenerator().generate_qa_config("http://127.0.0.1:8322"))
+        assert "video: 'off'" in cfg
+        assert cfg.count("name: 'chromium'") == 1
+        assert "firefox" not in cfg
+        assert "process.env.BASE_URL" in cfg
+        assert "'http://127.0.0.1:8322'" in cfg
+        assert "missingSteps: 'fail-on-gen'" in cfg
+        assert "PW_WORKERS" in cfg
+
+    def test_read_qa_steps_returns_the_static_vocabulary(self):
+        steps = ConfigGenerator().read_qa_steps()
+        assert len(steps) == 1
+        assert steps[0]["filename"] == "qa.steps.ts"
+        assert steps[0]["step_count"] == 8
+        assert "createBdd()" in steps[0]["content"]

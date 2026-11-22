@@ -269,3 +269,34 @@ def test_headings_truncation_is_reported() -> None:
     out = extract_structure("".join(f"<h2>H{i}</h2>" for i in range(25)))
     assert out["headings_truncated"] == 5
     assert extract_structure("<h1>only</h1>")["headings_truncated"] == 0
+
+
+# ---------------------------------------------------------------------------
+# role + checkbox accessible-name regressions (grounded QA depends on both)
+# ---------------------------------------------------------------------------
+
+
+def test_interactive_elements_carry_their_aria_role():
+    structure = extract_structure('<a href="/docs">Docs</a><button>Go</button>')
+    by_label = {e["label"]: e["role"] for e in structure["interactive_elements"]}
+    assert by_label["Docs"] == "link"
+    assert by_label["Go"] == "button"
+
+
+def test_checkbox_label_is_the_label_text_not_the_value():
+    """A checkbox's `value` is submitted data, not its accessible name.
+
+    The old precedence recorded `value` ("0"), so a generated step looked for
+    ``getByRole('checkbox', { name: '0' })`` on an app whose real checkbox name is
+    the wrapping label — a locator that can never match.
+    """
+    html = (
+        "<form><fieldset><legend>Dagen</legend>"
+        '<label for="days-0"><input type="checkbox" name="days" value="0" id="days-0">'
+        "maandag</label>"
+        "</fieldset></form>"
+    )
+    structure = extract_structure(html)
+    boxes = [e for e in structure["interactive_elements"] if e["role"] == "checkbox"]
+    assert len(boxes) == 1
+    assert boxes[0]["label"] == "maandag"
