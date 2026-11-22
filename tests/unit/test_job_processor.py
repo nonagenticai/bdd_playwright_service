@@ -9,7 +9,7 @@ import pytest
 from w2v_common.tenant import UnvouchedTenantError
 
 from src.services.generation.feature_generator import FeatureGenerator
-from src.services.generation.step_def_generator import StepDefGenerator
+from src.services.generation.step_def_generator import StepCoverageReport, StepDefGenerator
 from src.services.input.gherkin_parser import GherkinParser
 from src.services.input.inspection_adapter import InspectionAdapter
 from src.services.input.page_fetcher import FetchedPage
@@ -66,7 +66,13 @@ def _make_mock_job(
     job.input_type = kwargs.get("input_type", "web_url")
     job.target_url = kwargs.get("target_url", "https://example.com")
     job.app_path = kwargs.get("app_path")
-    job.config = kwargs.get("config", {})
+    # These tests model the LEGACY QA pipeline (LLM features + LLM step defs). The
+    # stream now defaults to the grounded path; callers that want to test it pass
+    # an explicit ``config={"generation_mode": "grounded"}``.
+    default_config: dict[str, object] = (
+        {"generation_mode": "legacy"} if stream == "qa_suite" else {}
+    )
+    job.config = kwargs.get("config", default_config)
     job.narration_config = kwargs.get("narration_config", {})
     job.inspection_data = None
     return job
@@ -630,15 +636,16 @@ class TestGenerateFeatures:
         }
 
         for stream, method_name in stream_method_map.items():
+            config = {"generation_mode": "legacy"}
             with patch.object(
                 FeatureGenerator,
                 method_name,
                 new_callable=AsyncMock,
                 return_value=[{"filename": "test.feature", "content": "F"}],
             ) as mock_method:
-                result = await processor._generate_features(stream, mock_inspection, {})
+                result = await processor._generate_features(stream, mock_inspection, config)
 
-                mock_method.assert_called_once_with(mock_inspection, {})
+                mock_method.assert_called_once_with(mock_inspection, config)
                 assert len(result) == 1
 
 
@@ -1157,12 +1164,140 @@ class TestZeroFeaturesIsNotSuccess:
         processor._feature_gen = MagicMock(spec=FeatureGenerator)
         getattr(processor._feature_gen, method).return_value = []
         with pytest.raises(RuntimeError, match="zero feature"):
-            await processor._generate_features(stream, {"pages": []}, {})
+            await processor._generate_features(stream, {"pages": []}, {"generation_mode": "legacy"})
 
     @pytest.mark.asyncio
     async def test_non_empty_feature_list_passes_through(self):
         processor = JobProcessor()
         processor._feature_gen = MagicMock(spec=FeatureGenerator)
         processor._feature_gen.generate_qa_features.return_value = [{"filename": "a.feature"}]
-        out = await processor._generate_features("qa_suite", {"pages": []}, {})
+        out = await processor._generate_features(
+            "qa_suite", {"pages": []}, {"generation_mode": "legacy"}
+        )
         assert out == [{"filename": "a.feature"}]
+
+
+# ---------------------------------------------------------------------------
+# Grounded QA path
+# ---------------------------------------------------------------------------
+
+_GROUNDED_INSPECTION: dict[str, object] = {
+    "pages": [
+        {
+            "url": "https://example.com/",
+            "title": "Home - Example",
+            "headings": ["Home"],
+            "interactive_elements": [
+                {
+                    "tag": "a",
+                    "type": "",
+                    "name": "",
+                    "label": "Docs",
+                    "selector": 'getByRole("link", { name: "Docs", exact: true })',
+                    "text": "Docs",
+                    "href": "/docs",
+                    "role": "link",
+                }
+            ],
+            "text_content": "Welcome to the example app.",
+            "elements_truncated": 0,
+            "headings_truncated": 0,
+            "page_type": "content",
+            "has_forms": False,
+        },
+        {
+            "url": "https://example.com/docs",
+            "title": "Docs - Example",
+            "headings": ["Documentation"],
+            "interactive_elements": [],
+            "text_content": "Documentation body.",
+            "elements_truncated": 0,
+            "headings_truncated": 0,
+            "page_type": "content",
+            "has_forms": False,
+        },
+    ],
+    "navigation_graph": [],
+    "platform": "web",
+    "base_url": "https://example.com",
+}
+
+
+class TestGroundedQaPath:
+    @pytest.mark.usefixtures("_patch_llm")
+    async def test_generate_features_grounded_never_calls_the_llm(self):
+        processor = JobProcessor()
+        processor._feature_gen = MagicMock(spec=FeatureGenerator)
+        features = await processor._generate_features("qa_suite", _GROUNDED_INSPECTION, {})
+        processor._feature_gen.generate_qa_features.assert_not_called()
+        assert len(features) == 2
+        assert all(f["filename"].startswith("page_contract_") for f in features)
+
+    @pytest.mark.usefixtures("_patch_llm")
+    async def test_grounded_step_defs_are_the_static_template(self):
+        processor = JobProcessor()
+        steps = await processor._generate_step_definitions(
+            features=[],
+            inspection=_GROUNDED_INSPECTION,
+            config={},
+            stream="qa_suite",
+            coverage=StepCoverageReport(),
+            grounded_qa=True,
+        )
+        assert [s["filename"] for s in steps] == ["qa.steps.ts"]
+        assert "createBdd()" in steps[0]["content"]
+        assert "createBd()" not in steps[0]["content"]
+
+    @pytest.mark.usefixtures("_patch_llm")
+    def test_grounded_config_has_video_off_and_one_browser(self):
+        processor = JobProcessor()
+        cfg, _, _, auth_setup = processor._generate_config_files(
+            inspection=_GROUNDED_INSPECTION,
+            stream="qa_suite",
+            auth_config=None,
+            grounded_qa=True,
+        )
+        # Comment lines explain the demo-video scaffold (and name firefox); judge the
+        # configuration itself.
+        code = "\n".join(line for line in cfg.splitlines() if not line.strip().startswith("//"))
+        assert "video: 'off'" in code
+        assert "firefox" not in code
+        assert auth_setup is None
+
+    @pytest.mark.usefixtures("_patch_llm")
+    async def test_process_job_grounded_reports_validation(self, mock_db_session: AsyncMock):
+        job = _make_mock_job(stream="qa_suite", config={"generation_mode": "grounded"})
+        with (
+            patch(f"{MODULE}.JobManager.get_job", new_callable=AsyncMock, return_value=job),
+            patch(f"{MODULE}.JobManager.mark_processing", new_callable=AsyncMock),
+            patch(f"{MODULE}.JobManager.mark_completed", new_callable=AsyncMock) as completed,
+            patch(f"{MODULE}.JobManager.record_usage", new_callable=AsyncMock),
+            patch.object(
+                StorageService, "store_text", new_callable=AsyncMock, return_value="/tmp/a"
+            ) as mock_store,
+            patch.object(
+                PackageBuilder,
+                "build_package",
+                new_callable=AsyncMock,
+                return_value="/tmp/package.zip",
+            ),
+            patch.object(
+                JobProcessor,
+                "_resolve_input",
+                new_callable=AsyncMock,
+                return_value=_GROUNDED_INSPECTION,
+            ),
+        ):
+            processor = JobProcessor()
+            await processor.process_job(mock_db_session, "proc-job-1", "n8n-dev")
+
+        kwargs = completed.call_args[1]
+        assert kwargs["features_generated"] == 2
+        assert kwargs["step_defs_generated"] == 1
+        validation = kwargs["step_coverage"]["grounding_validation"]
+        assert validation["rejected_count"] == 0
+        # Page 1: contract + one navigation; page 2: contract only.
+        assert validation["kept_scenarios"] == 3
+        stored = [call.args[2] for call in mock_store.await_args_list]
+        assert "validation.json" in stored
+        assert "step_coverage.json" in stored

@@ -6,6 +6,7 @@ import logging
 import re
 from collections.abc import Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 from src.services.generation.gherkin_grounding import (
     PageCorpus,
@@ -14,6 +15,7 @@ from src.services.generation.gherkin_grounding import (
     grounding_correction,
 )
 from src.services.generation.llm_client import LLMClient
+from src.services.generation.qa_vocabulary import vocabulary_prompt
 from src.services.gherkin_keywords import (
     EXAMPLES_BLOCK_RE,
     OUTLINE_KEYWORDS,
@@ -1116,6 +1118,73 @@ class FeatureGenerator:
         features = await self._revalidate_features(features, prompt, system_prompt)
         features = _enforce_scenario_cap(features, max_scenarios)
         logger.info("Generated %d QA feature files", len(features))
+        return features
+
+    async def generate_grounded_qa_features(
+        self, inspection: _Inspection, config: _Config
+    ) -> list[_Feature]:
+        """OPT-IN LLM enrichment for a grounded QA suite.
+
+        The default QA path is deterministic (``qa_suite.build_grounded_features``).
+        This method exists for callers that ask for ``include_llm_scenarios`` and
+        hands the model the SAME closed vocabulary and the SAME captured evidence;
+        every scenario it returns is still validated by
+        ``qa_suite.validate_features`` and dropped if it is not grounded.
+
+        The prompt therefore spends its words on the two failure shapes measured on
+        the NetCare run: invented business flows (24h retention, email confirmation,
+        expiry) and content that is not on the page (a document title asserted as a
+        heading, checkbox values used as labels). Explain the evidence rule, not the
+        Gherkin syntax.
+        """
+        page_summary = _build_page_summary(inspection)
+        max_scenarios = config.get("max_scenarios_per_feature", 10)
+        paths: list[str] = []
+        for page in inspection.get("pages", []):
+            url = str(page.get("url") or "")
+            if not url:
+                continue
+            path = urlsplit(url).path or "/"
+            if path not in paths:
+                paths.append(path)
+
+        prompt = (
+            "Generate Gherkin BDD feature files for QA testing the following web "
+            "application. Every scenario will be executed EXACTLY as written by "
+            "Playwright against the live app, so a claim the snapshot does not prove "
+            "is a test that can only fail.\n\n"
+            f"{page_summary}\n\n"
+            "Captured page paths — a scenario may open ONLY these, written as a path:\n"
+            + "\n".join(f"- {path}" for path in paths)
+            + "\n\nCLOSED STEP VOCABULARY — every step MUST be one of these, verbatim, "
+            "with its parameter in double quotes. There are no other steps:\n"
+            f"{vocabulary_prompt()}\n\n"
+            "Rules:\n"
+            '- Start every scenario with: Given the user opens the page "<path>"\n'
+            "- Assert ONLY content the summary above lists for that page: its "
+            "headings, its title, its interactive element labels, its visible text. "
+            "Never assert a document <title> as a heading, and never use a form "
+            "value (such as a checkbox value) as an element name.\n"
+            "- Never invent a flow, control, count, date or business rule. If the "
+            "snapshot does not show it, it cannot be tested here.\n"
+            "- Do NOT write a Background, Scenario Outline, Examples table or data "
+            "table.\n"
+            "- Do NOT test state a static snapshot cannot show: email confirmation, "
+            "expiry, retention/deletion, time passing, backend data.\n"
+            "- To follow a link, click it and then assert the target page's URL path "
+            "and one of its headings.\n"
+            f"- Maximum {max_scenarios} scenarios per feature file\n"
+            "- Wrap each feature in a ```gherkin code block\n"
+        )
+        system_prompt = (
+            "You are a senior QA engineer who writes executable, evidence-only Gherkin. "
+            "Output only valid Gherkin syntax in fenced code blocks."
+        )
+        raw = await self._llm.generate(prompt, system_prompt=system_prompt)
+        features = _parse_features(raw)
+        features = await self._revalidate_features(features, prompt, system_prompt)
+        features = _enforce_scenario_cap(features, max_scenarios)
+        logger.info("Generated %d opt-in LLM QA feature files", len(features))
         return features
 
     async def generate_accessibility_features(

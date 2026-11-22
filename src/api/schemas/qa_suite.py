@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -28,6 +28,19 @@ class QASuiteRequest(BaseModel):
     focus_areas: list[str] | None = None
     include_negative_tests: bool = True
     max_scenarios_per_feature: int = Field(default=10, ge=1, le=50)
+
+    #: ``grounded`` (default) builds deterministic page contracts from the captured
+    #: structure and validates every scenario against it; ``legacy`` keeps the old
+    #: LLM-authors-everything path. A job with ``auth_config`` always uses the
+    #: legacy path — the grounded vocabulary has no storage-state setup yet.
+    generation_mode: Literal["grounded", "legacy"] = "grounded"
+    #: Opt-in: let the LLM add scenarios to the grounded floor. They must use the
+    #: same closed vocabulary and are dropped if the snapshot cannot ground them.
+    include_llm_scenarios: bool = False
+    #: The locale the snapshot was captured in (e.g. ``nl-NL``). @playwright/test
+    #: defaults to en-US; running a Dutch capture under that default fails every
+    #: heading even though the app is healthy. Embedded in the generated config.
+    locale: str | None = Field(default=None, pattern=r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 
     # Authentication for login-gated sites
     auth_config: dict[str, Any] | None = None

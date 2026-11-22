@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -374,6 +375,57 @@ setup('authenticate', async ({{ page }}) => {{
             return []
         content = steps_path.read_text(encoding="utf-8")
         return [{"filename": "showcase.steps.ts", "content": content, "step_count": 4}]
+
+    def read_qa_steps(self) -> list[dict[str, Any]]:
+        """Return the STATIC grounded-QA step-definition file.
+
+        A grounded QA package never ships LLM-authored TypeScript: the whole file
+        is the closed vocabulary in ``templates/scaffold/qa/steps.ts``, compiled once
+        in CI (bddgen + tsc). A missing template is a build error — returning ``[]``
+        would ship a suite whose every step is undefined.
+        """
+        steps_path = _TEMPLATES_DIR / "qa" / "steps.ts"
+        if not steps_path.is_file():
+            raise FileNotFoundError(f"grounded QA step template is missing: {steps_path}")
+        content = steps_path.read_text(encoding="utf-8")
+        step_calls = len(re.findall(r"^(?:Given|When|Then)\(", content, re.MULTILINE))
+        return [{"filename": "qa.steps.ts", "content": content, "step_count": step_calls}]
+
+    def generate_qa_config(self, base_url: str, locale: str | None = None) -> str:
+        """Generate the QA-suite ``playwright.config.ts`` (video off, one browser).
+
+        Deliberately NOT the demo-video scaffold: that one records 1080p video on
+        chromium and firefox because footage is its deliverable, and reusing it for a
+        QA suite is what made a 14-scenario run hang for an hour.
+
+        ``locale`` is the language the snapshot was captured in. It is load-bearing:
+        @playwright/test defaults to en-US, so a Dutch capture asserted under it fails
+        every heading even though the app is healthy.
+        """
+        template_path = _TEMPLATES_DIR / "qa" / "playwright.config.ts"
+        if not template_path.is_file():
+            raise FileNotFoundError(f"grounded QA config template is missing: {template_path}")
+        template = template_path.read_text(encoding="utf-8")
+        locale_line = (
+            f"    locale: process.env.BDD_LOCALE || {json.dumps(locale)},\n" if locale else ""
+        )
+        return template.replace("{{LOCALE_LINE}}", locale_line).replace(
+            "{{BASE_URL}}", base_url or "http://127.0.0.1:8000"
+        )
+
+    def generate_qa_package_json(self) -> str:
+        """Generate the QA package manifest (separate pin from the demo scaffold).
+
+        The demo scaffold pins Playwright 1.50 because its recording behaviour was
+        MEASURED there. The QA suite only executes assertions, and 1.50's installer
+        hangs on a current Node (26) — a caller who runs ``npm install &&
+        npx playwright install`` would never get a browser. This manifest tracks the
+        Playwright the target apps' own e2e suites use.
+        """
+        template_path = _TEMPLATES_DIR / "qa" / "package.json"
+        if not template_path.is_file():
+            raise FileNotFoundError(f"grounded QA package template is missing: {template_path}")
+        return template_path.read_text(encoding="utf-8")
 
     def generate_tsconfig(self) -> str:
         """Generate a tsconfig.json file.

@@ -7,7 +7,7 @@ import logging
 import re
 import time
 from dataclasses import asdict
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,6 +17,7 @@ from w2v_common.discovery import service_url
 from src.api.constants import STREAM_ACCESSIBILITY, STREAM_DEMO_VIDEO, STREAM_QA_SUITE
 from src.api.schemas.gherkin import GherkinScenario, GherkinStep
 from src.config import get_settings
+from src.database.models import StepCoverage
 from src.services.duration_budget import (
     DurationBudgetPlan,
     narration_word_budgets,
@@ -30,6 +31,10 @@ from src.services.generation.feature_generator import (
     FeatureGenerator,
 )
 from src.services.generation.llm_client import LLMClient
+from src.services.generation.qa_suite import (
+    build_grounded_features,
+    validate_features,
+)
 from src.services.generation.step_def_generator import (
     GUARANTEED_RECORDING_SECONDS_PER_SCENARIO,
     StepCoverageReport,
@@ -57,6 +62,24 @@ from src.services.package_builder import PackageBuilder
 from src.services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
+
+#: A JSON-shaped payload at a storage/DB boundary (features, validation reports).
+JsonDict = dict[str, Any]
+
+
+def _grounded_qa_enabled(config: JsonDict) -> bool:
+    """True when this QA job uses the deterministic, snapshot-grounded path.
+
+    ``generation_mode`` defaults to ``grounded`` for the QA stream: the legacy path
+    (LLM-authored features AND LLM-authored step definitions, packaged with the
+    demo-video config) is what shipped unexecutable suites. A job that carries an
+    ``auth_config`` stays on the legacy path — its package needs a storage-state
+    setup project the grounded vocabulary does not model yet.
+    """
+    if config.get("auth_config"):
+        return False
+    return config.get("generation_mode", "grounded") != "legacy"
+
 
 _CLIP_TAG_RE = re.compile(r"^@?(clip-\d+)$")
 
@@ -448,6 +471,14 @@ class JobProcessor:
         # 3. Generate features (LLM)
         features = await self._generate_features(stream, inspection, config)
 
+        # 3a. Grounded QA: drop every scenario the snapshot cannot prove. A suite
+        # with nothing left raises here — shipping an empty package as "completed"
+        # is the silent-zero failure this service exists to prevent.
+        grounded_qa = stream == STREAM_QA_SUITE and _grounded_qa_enabled(config)
+        grounding_report: JsonDict | None = None
+        if grounded_qa:
+            features, grounding_report = validate_features(features, inspection)
+
         # 3b. Split the ORDERED film duration across the scenarios that were
         # ACTUALLY generated (never the requested cap — the generator routinely
         # emits fewer, and budgeting against an unfilled cap under-runs every
@@ -455,11 +486,9 @@ class JobProcessor:
         # backward-compatibility contract: every step below is then a no-op.
         budget = self._plan_budget(stream, features, config)
 
-        # 4. Generate step definitions. The knowledge-pack showcase path uses the
-        # fixed deterministic step vocabulary (no LLM invents steps); every other
-        # path asks the LLM to implement steps against the inspected selectors.
-        platform = inspection.get("platform", "web")
-        auth_config = config.get("auth_config")
+        # 4. Generate step definitions. The knowledge-pack showcase path and the
+        # grounded QA path use fixed deterministic vocabularies (no LLM invents
+        # steps); every other path asks the LLM against the inspected selectors.
         # Stub visibility: an auto-stubbed step PASSES WITHOUT ACTING, so a
         # heavily-stubbed "demo" films a page that never changed. The generator is
         # the only place that knows the share; carry it out per job (never on the
@@ -471,17 +500,14 @@ class JobProcessor:
                 for concept in feature.get(UNGROUNDED_CONCEPTS_KEY) or []
             ]
         )
-        if config.get("knowledge_screens"):
-            step_defs = self._config_gen.read_showcase_steps()
-        else:
-            step_defs = await self._step_def_gen.generate(
-                features,
-                inspection,
-                platform,
-                auth_config=auth_config,
-                recording=(stream == STREAM_DEMO_VIDEO),
-                coverage=coverage,
-            )
+        step_defs = await self._generate_step_definitions(
+            features=features,
+            inspection=inspection,
+            config=config,
+            stream=stream,
+            coverage=coverage,
+            grounded_qa=grounded_qa,
+        )
 
         # 4b. Make the DWELL proportionate to the order. Both step-def paths land
         # here — the LLM path above and the deterministic showcase path, whose
@@ -508,24 +534,14 @@ class JobProcessor:
                 )
 
         # 5. Generate config files (deterministic)
-        base_url = inspection.get("base_url", "")
-        has_auth = bool(auth_config)
-        # Video streams keep a missing step runnable (so the suite still records);
-        # the strict QA streams want a missing step to fail at generation time.
-        missing_steps = (
-            "fail-on-gen" if stream in (STREAM_QA_SUITE, STREAM_ACCESSIBILITY) else "fail-on-run"
+        auth_config = config.get("auth_config")
+        playwright_config, package_json, tsconfig, auth_setup = self._generate_config_files(
+            inspection=inspection,
+            stream=stream,
+            auth_config=auth_config,
+            grounded_qa=grounded_qa,
+            locale=config.get("locale"),
         )
-        playwright_config = self._config_gen.generate_playwright_config(
-            base_url, platform, has_auth=has_auth, missing_steps=missing_steps
-        )
-        package_json = self._config_gen.generate_package_json()
-        tsconfig = self._config_gen.generate_tsconfig()
-
-        # 5b. Generate auth setup file if auth is configured
-        auth_setup: str | None = None
-        if auth_config:
-            login_url = auth_config.get("login_url", base_url)
-            auth_setup = self._config_gen.generate_auth_setup(login_url)
 
         # 6. Store all artifacts to disk. Recording packages (demo_video) ship the
         # shared app-agnostic step-helper lib so their steps import it.
@@ -539,7 +555,8 @@ class JobProcessor:
             tsconfig,
             auth_setup=auth_setup,
             lib_files=lib_files,
-            coverage=coverage if stream == STREAM_DEMO_VIDEO else None,
+            coverage=coverage if (stream == STREAM_DEMO_VIDEO or grounded_qa) else None,
+            validation=grounding_report,
         )
 
         # 7. Generate narration (if enabled). For the knowledge-pack path the
@@ -597,6 +614,11 @@ class JobProcessor:
         # consumed — a permanent swallowed-404 dead-signal — so it was removed.)
         downstream_jobs: dict[str, Any] = {}
         elapsed = time.monotonic() - t0
+        coverage_payload: JsonDict = dict(coverage.as_dict())
+        if grounding_report is not None:
+            # One place a consumer looks to learn whether the delivered suite was
+            # cut down by grounding, and why.
+            coverage_payload["grounding_validation"] = grounding_report
         await JobManager.mark_completed(
             db,
             job_id,
@@ -606,7 +628,7 @@ class JobProcessor:
             narration_script=narration_script,
             downstream_jobs=downstream_jobs or None,
             generation_time_seconds=elapsed,
-            step_coverage=coverage.as_dict(),
+            step_coverage=cast(StepCoverage, coverage_payload),
         )
         if coverage.degraded:
             logger.warning(
@@ -961,6 +983,16 @@ class JobProcessor:
         empty deliverable — the silent-zero class this service exists to avoid.
         """
         if stream == "qa_suite":
+            if _grounded_qa_enabled(config):
+                # Deterministic floor: page contracts + captured-link navigation,
+                # built only from the snapshot. The opt-in LLM pass may add more,
+                # but it speaks the same closed vocabulary and is validated below.
+                features = build_grounded_features(inspection, config)
+                if config.get("include_llm_scenarios"):
+                    features = features + await self._feature_gen.generate_grounded_qa_features(
+                        inspection, config
+                    )
+                return features
             features = await self._feature_gen.generate_qa_features(inspection, config)
         elif stream == "accessibility":
             features = await self._feature_gen.generate_accessibility_features(inspection, config)
@@ -986,6 +1018,78 @@ class JobProcessor:
             )
         return features
 
+    async def _generate_step_definitions(
+        self,
+        *,
+        features: list[JsonDict],
+        inspection: JsonDict,
+        config: JsonDict,
+        stream: str,
+        coverage: StepCoverageReport,
+        grounded_qa: bool,
+    ) -> list[JsonDict]:
+        """Pick the step-definition source for this job.
+
+        Deterministic first: a knowledge pack or a grounded QA job ships a fixed,
+        CI-compiled vocabulary. Only the remaining streams ask the LLM.
+        """
+        if config.get("knowledge_screens"):
+            return self._config_gen.read_showcase_steps()
+        if grounded_qa:
+            # No LLM writes TypeScript on this path; that is what shipped createBd(),
+            # non-async arrows and quoted "{string}" placeholders.
+            return self._config_gen.read_qa_steps()
+        return await self._step_def_gen.generate(
+            features,
+            inspection,
+            inspection.get("platform", "web"),
+            auth_config=config.get("auth_config"),
+            recording=(stream == STREAM_DEMO_VIDEO),
+            coverage=coverage,
+        )
+
+    def _generate_config_files(
+        self,
+        *,
+        inspection: JsonDict,
+        stream: str,
+        auth_config: JsonDict | None,
+        grounded_qa: bool,
+        locale: str | None = None,
+    ) -> tuple[str, str, str, str | None]:
+        """Return ``(playwright_config, package_json, tsconfig, auth_setup)``."""
+        base_url = inspection.get("base_url", "")
+        if grounded_qa:
+            # QA config: video OFF, one browser, env-overridable baseURL/locale. The
+            # demo scaffold's 1080p video x two browsers is why the NetCare run hung.
+            playwright_config = self._config_gen.generate_qa_config(base_url, locale=locale)
+        else:
+            # Video streams keep a missing step runnable (so the suite still records);
+            # the strict streams want a missing step to fail at generation time.
+            missing_steps = (
+                "fail-on-gen"
+                if stream in (STREAM_QA_SUITE, STREAM_ACCESSIBILITY)
+                else "fail-on-run"
+            )
+            playwright_config = self._config_gen.generate_playwright_config(
+                base_url,
+                inspection.get("platform", "web"),
+                has_auth=bool(auth_config),
+                missing_steps=missing_steps,
+            )
+        auth_setup: str | None = None
+        if auth_config:
+            login_url = auth_config.get("login_url", base_url)
+            auth_setup = self._config_gen.generate_auth_setup(login_url)
+        return (
+            playwright_config,
+            self._config_gen.generate_qa_package_json()
+            if grounded_qa
+            else self._config_gen.generate_package_json(),
+            self._config_gen.generate_tsconfig(),
+            auth_setup,
+        )
+
     async def _store_artifacts(
         self,
         job_id: str,
@@ -998,7 +1102,8 @@ class JobProcessor:
         auth_setup: str | None = None,
         lib_files: dict[str, str] | None = None,
         coverage: StepCoverageReport | None = None,
-    ) -> dict[str, Any]:
+        validation: JsonDict | None = None,
+    ) -> JsonDict:
         """Write all generated files to storage and return path mapping."""
         paths: dict[str, Any] = {"feature_files": [], "step_def_files": []}
 
@@ -1039,6 +1144,15 @@ class JobProcessor:
                 job_id,
                 json.dumps(coverage.as_dict(), indent=2, sort_keys=True),
                 "step_coverage.json",
+            )
+
+        if validation is not None:
+            # Same rule for grounding: the runner must be able to see which scenarios
+            # were rejected (and why) without polling the API.
+            paths["grounding_validation"] = await self._storage.store_text(
+                job_id,
+                json.dumps(validation, indent=2, sort_keys=True),
+                "validation.json",
             )
 
         return paths

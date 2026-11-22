@@ -42,6 +42,12 @@ class InteractiveElementDict(TypedDict):
     selector: str
     text: str
     href: str
+    #: ARIA role the selector was built from ("" when the tag has none). The
+    #: grounded QA generator matches ``getByRole(role, {name})`` assertions against
+    #: this rather than re-deriving a role from the tag: ``<input type="submit">``
+    #: is a button, ``<a href>`` is a link, and an explicit ``role=""`` attribute
+    #: overrides the tag. Additive key — consumers may ignore it.
+    role: str
 
 
 class DomTokensDict(TypedDict):
@@ -283,6 +289,7 @@ class _StructureParser(HTMLParser):
                 "href": attr_map.get("href", "").strip(),
                 "id": attr_map.get("id", "").strip(),
                 "role": _role_for(tag, attr_map),
+                "aria_label": _clean(attr_map.get("aria-label", "")),
                 "attr_label": attr_label,
                 "text": "",
                 "attrs": attr_map,
@@ -359,12 +366,28 @@ class _StructureParser(HTMLParser):
         for el in self._elements:
             # Accessible name: aria/placeholder/value/title/alt, then visible
             # text (links/buttons), then a <label for=id> / wrapping <label>.
-            label = (
-                el["attr_label"]
-                or _clean(el["text"])
-                or self.labels_for.get(el["id"], "")
-                or el.get("wrap_label", "")
-            )
+            #
+            # checkbox/radio are the exception: HTML gives them no placeholder and
+            # their `value` is the SUBMITTED value ("0", "1", … or an opaque id),
+            # NOT their accessible name — that comes from the associated label.
+            # The old precedence recorded `value`, so a generated step looked for
+            # `getByRole('checkbox', { name: '0' })` on an app whose real checkbox
+            # names are "maandag", "dinsdag", … and could never match.
+            if el["role"] in {"checkbox", "radio"}:
+                label = (
+                    el["aria_label"]
+                    or self.labels_for.get(el["id"], "")
+                    or el.get("wrap_label", "")
+                    or _clean(el["text"])
+                    or el["attr_label"]
+                )
+            else:
+                label = (
+                    el["attr_label"]
+                    or _clean(el["text"])
+                    or self.labels_for.get(el["id"], "")
+                    or el.get("wrap_label", "")
+                )
             label = label[:LABEL_LENGTH_CAP]
             selector = _selector_for(el["tag"], el["attrs"], label, el["role"])
             text = _clean(el["text"])[:LABEL_LENGTH_CAP]
@@ -381,6 +404,7 @@ class _StructureParser(HTMLParser):
                     "selector": selector,
                     "text": text,
                     "href": el["href"],
+                    "role": el["role"],
                 }
             )
         return out
@@ -402,7 +426,7 @@ def extract_structure(html: str) -> PageStructure:
 
     Returns a dict with ``headings`` (list[str]), ``has_forms`` (bool),
     ``interactive_elements`` (list of ``{tag,type,name,label,selector,text,
-    href}``), ``page_type`` (str), ``elements_truncated`` (int — how many
+    href,role}``), ``page_type`` (str), ``elements_truncated`` (int — how many
     interactive elements were dropped by the ``_MAX_ELEMENTS`` cap) and
     ``headings_truncated`` (the same count for the ``_MAX_HEADINGS`` cap). Both
     counts MUST be carried into the inspection page dict: a consumer that reads

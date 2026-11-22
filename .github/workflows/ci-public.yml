@@ -156,6 +156,44 @@ jobs:
       - name: pip-audit
         run: bash scripts/pip-audit.sh
 
+  # Compile gate for the GENERATED QA package. The service runtime is python-only
+  # (no Node), so the TypeScript a grounded QA job ships is never type-checked at
+  # generation time. This job renders a package through the SAME production
+  # functions and runs bddgen + tsc on it — the gate that catches createBd(),
+  # non-async arrows and quoted "{string}" patterns before a caller sees them.
+  package-compile:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: install (locked)
+        run: uv sync --frozen --all-extras
+
+      - name: render the grounded QA package
+        run: uv run python scripts/ci/render_qa_package.py "$RUNNER_TEMP/qa-package"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: install package dependencies
+        working-directory: ${{ runner.temp }}/qa-package
+        run: npm install --no-audit --no-fund
+
+      - name: bddgen + tsc
+        working-directory: ${{ runner.temp }}/qa-package
+        run: |
+          set -euo pipefail
+          npx bddgen
+          npx tsc --noEmit
+
   # Build (and on main, publish) the image. OFF by default: enable per repo with the
   # repository variable `PUBLISH_IMAGE=true`.
   image:
