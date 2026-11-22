@@ -619,3 +619,16 @@ class TestQaSuiteConfig:
         assert steps[0]["filename"] == "qa.steps.ts"
         assert steps[0]["step_count"] == 8
         assert "createBdd()" in steps[0]["content"]
+
+    def test_qa_package_pins_a_runnable_playwright(self):
+        pkg = json.loads(ConfigGenerator().generate_qa_package_json())
+        # 1.50's installer hangs on Node 26; the QA suite tracks the target apps.
+        assert pkg["devDependencies"]["@playwright/test"] == "1.64.1"
+        assert "@types/node" in pkg["devDependencies"]
+        assert pkg["devDependencies"]["playwright-bdd"] == "^9.2.1"
+
+    def test_qa_config_embeds_the_capture_locale(self):
+        cfg = _code(ConfigGenerator().generate_qa_config("http://x", locale="nl-NL"))
+        assert 'locale: process.env.BDD_LOCALE || "nl-NL"' in cfg
+        plain = _code(ConfigGenerator().generate_qa_config("http://x"))
+        assert "locale:" not in plain

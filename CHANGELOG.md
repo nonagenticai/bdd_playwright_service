@@ -17,9 +17,14 @@ All notable changes to this project are documented here. The format follows
   keeps the old path (also used when `auth_config` is set).
 - `package-compile` CI job: renders a grounded package and runs `bddgen` + `tsc --noEmit`
   on it — the compile gate the Node-less service runtime cannot provide.
+- QA packages ship their own manifest (Playwright 1.64.1 + playwright-bdd 9): the demo
+  scaffold's 1.50 pin was measured for video capture, and its installer hangs on Node 26.
 
 ### Fixed
 
+- `locale` request field: the snapshot's capture language is embedded in the generated
+  config. `@playwright/test` defaults to en-US, so a Dutch capture previously failed
+  every heading assertion.
 - `html_structure` now emits each interactive element's `role`, and checkbox/radio
   accessible names come from their `<label>` rather than the `value` attribute
   (`getByRole('checkbox', { name: '0' })` could never match).

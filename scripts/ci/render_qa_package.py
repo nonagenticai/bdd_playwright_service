@@ -119,7 +119,7 @@ def render(out_dir: Path) -> None:
     (out_dir / "playwright.config.ts").write_text(
         config_gen.generate_qa_config("https://example.com"), encoding="utf-8"
     )
-    (out_dir / "package.json").write_text(config_gen.generate_package_json(), encoding="utf-8")
+    (out_dir / "package.json").write_text(config_gen.generate_qa_package_json(), encoding="utf-8")
     (out_dir / "tsconfig.json").write_text(config_gen.generate_tsconfig(), encoding="utf-8")
     print(f"rendered {len(features)} feature file(s), {report['kept_scenarios']} scenario(s)")
 

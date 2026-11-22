@@ -540,6 +540,7 @@ class JobProcessor:
             stream=stream,
             auth_config=auth_config,
             grounded_qa=grounded_qa,
+            locale=config.get("locale"),
         )
 
         # 6. Store all artifacts to disk. Recording packages (demo_video) ship the
@@ -1054,13 +1055,14 @@ class JobProcessor:
         stream: str,
         auth_config: JsonDict | None,
         grounded_qa: bool,
+        locale: str | None = None,
     ) -> tuple[str, str, str, str | None]:
         """Return ``(playwright_config, package_json, tsconfig, auth_setup)``."""
         base_url = inspection.get("base_url", "")
         if grounded_qa:
-            # QA config: video OFF, one browser, env-overridable baseURL. The demo
-            # scaffold's 1080p video x two browsers is why the NetCare run hung.
-            playwright_config = self._config_gen.generate_qa_config(base_url)
+            # QA config: video OFF, one browser, env-overridable baseURL/locale. The
+            # demo scaffold's 1080p video x two browsers is why the NetCare run hung.
+            playwright_config = self._config_gen.generate_qa_config(base_url, locale=locale)
         else:
             # Video streams keep a missing step runnable (so the suite still records);
             # the strict streams want a missing step to fail at generation time.
@@ -1081,7 +1083,9 @@ class JobProcessor:
             auth_setup = self._config_gen.generate_auth_setup(login_url)
         return (
             playwright_config,
-            self._config_gen.generate_package_json(),
+            self._config_gen.generate_qa_package_json()
+            if grounded_qa
+            else self._config_gen.generate_package_json(),
             self._config_gen.generate_tsconfig(),
             auth_setup,
         )

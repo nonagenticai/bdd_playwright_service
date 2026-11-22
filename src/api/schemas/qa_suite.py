@@ -37,6 +37,10 @@ class QASuiteRequest(BaseModel):
     #: Opt-in: let the LLM add scenarios to the grounded floor. They must use the
     #: same closed vocabulary and are dropped if the snapshot cannot ground them.
     include_llm_scenarios: bool = False
+    #: The locale the snapshot was captured in (e.g. ``nl-NL``). @playwright/test
+    #: defaults to en-US; running a Dutch capture under that default fails every
+    #: heading even though the app is healthy. Embedded in the generated config.
+    locale: str | None = Field(default=None, pattern=r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 
     # Authentication for login-gated sites
     auth_config: dict[str, Any] | None = None

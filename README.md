@@ -55,6 +55,11 @@ npm install
 BASE_URL=https://your-app npx bddgen && npx playwright test
 ```
 
+**Capture language:** pass `locale` (e.g. `"nl-NL"`) when the snapshot was not
+rendered in English. `@playwright/test` defaults to `en-US`, so a Dutch capture run
+under that default fails every heading even though the app is healthy. The generated
+config embeds the locale; `BDD_LOCALE` overrides it at run time.
+
 `include_llm_scenarios: true` lets the LLM add scenarios inside the same vocabulary;
 they are grounded and dropped under the same rules. Requests carrying `auth_config`
 (login-gated storage state) stay on `generation_mode: "legacy"` — the grounded

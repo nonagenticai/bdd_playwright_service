@@ -68,6 +68,7 @@ async def start_qa_suite(request_body: QASuiteRequest, request: Request) -> Asyn
         "max_scenarios_per_feature": request_body.max_scenarios_per_feature,
         "generation_mode": request_body.generation_mode,
         "include_llm_scenarios": request_body.include_llm_scenarios,
+        "locale": request_body.locale,
         "feature_files": request_body.feature_files,
         "html_snapshot_path": request_body.html_snapshot_path,
         "inspection_job_id": request_body.inspection_job_id,

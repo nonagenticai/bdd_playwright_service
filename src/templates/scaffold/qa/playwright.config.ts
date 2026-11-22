@@ -27,7 +27,10 @@ export default defineConfig({
     // The capture-time origin is only a default; a suite is portable to another
     // environment with BASE_URL, and features never carry an absolute URL.
     baseURL: process.env.BASE_URL || '{{BASE_URL}}',
-    actionTimeout: Number(process.env.PW_ACTION_TIMEOUT_MS) || 10_000,
+    // The snapshot was rendered in a specific language. @playwright/test defaults
+    // to en-US regardless of the host, so a Dutch capture asserted against an
+    // English render fails every heading. BDD_LOCALE overrides per run.
+{{LOCALE_LINE}}    actionTimeout: Number(process.env.PW_ACTION_TIMEOUT_MS) || 10_000,
     navigationTimeout: Number(process.env.PW_NAVIGATION_TIMEOUT_MS) || 15_000,
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
